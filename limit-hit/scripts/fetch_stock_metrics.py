@@ -38,6 +38,12 @@ def moving_average(values, span):
     return round(sum(values[-span:]) / span, 3)
 
 
+def metric_quality(source, limitations):
+    if str(source or "").startswith("东方财富") and not limitations:
+        return "exact"
+    return "degraded"
+
+
 def build_metrics(code, cutoff, days):
     bars, source, limitations = fetch_stock_structure.fetch_kline(code, days, cutoff)
     bars = fetch_stock_structure.filter_bars(bars, cutoff)
@@ -89,6 +95,7 @@ def build_metrics(code, cutoff, days):
         "one_word": one_word,
         "chips": chips,
         "source": source,
+        "quality": metric_quality(source, limitations),
         "limitations": limitations,
     }
 
@@ -131,7 +138,11 @@ def print_text(payload):
             "-" if row.get("open_gap_pct") is None else "{:+.2f}".format(row["open_gap_pct"]),
             "-" if chips.get("profit_ratio_pct") is None else "{:.2f}".format(chips["profit_ratio_pct"]),
         ))
+    degraded = sum(row.get("quality") == "degraded" for row in payload["rows"])
     print("注：筹码为日K+换手率推演值；指标不包含买卖判断。")
+    if degraded:
+        print("注：{} 只股票的日K或换手率来自降级源，不能视为精确筹码。".format(
+            degraded))
 
 
 def main():

@@ -202,13 +202,19 @@ def fetch_board_quote(bk_code):
     if not diff:
         raise RuntimeError("未找到板块 {}：请确认 BK 代码来自 fetch_sector_boards 输出。".format(bk_code))
     raw = diff[0]
+    change5 = to_float(raw.get("f109"))
+    change10 = to_float(raw.get("f160"))
+    duplicate_gain10 = (
+        change5 is not None and change10 is not None and change5 == change10
+    )
     return {
         "code": str(raw.get("f12") or bk_code),
         "name": str(raw.get("f14") or bk_code),
         "index": to_float(raw.get("f2")),
         "change_pct": to_float(raw.get("f3")),
-        "change5_pct": to_float(raw.get("f109")),
-        "change10_pct": to_float(raw.get("f160")),
+        "change5_pct": change5,
+        "change10_pct": None if duplicate_gain10 else change10,
+        "change10_duplicate": duplicate_gain10,
         "leader_name": str(raw.get("f128") or "-"),
         "leader_change_pct": to_float(raw.get("f136")),
         "up_count": to_float(raw.get("f104")),
@@ -511,6 +517,7 @@ def normalize_rows(diff, min_turnover, max_turnover, min_gain, max_gain,
             "ts": to_float(raw.get("f124")),
             "limit_up": is_limit_up(price, high, change_pct, digits),
         })
+    fb.clear_duplicate_gain10(rows)
     return rows
 
 
@@ -748,6 +755,17 @@ def main():
             errors.append("{}：{}".format(SOURCE_NAMES[candidate], exc))
     if source is None:
         sys.exit("错误：板块成分股榜取数失败（{}）".format("；".join(errors)))
+
+    duplicate_gain10 = (
+        source == "eastmoney"
+        and (
+            board.get("change10_duplicate")
+            or any(row.get("change10_duplicate") for row in rows)
+        )
+    )
+    if duplicate_gain10:
+        prefix = (limitation + "；") if limitation else "口径：东方财富板块/行情公开接口；"
+        limitation = prefix + "f160 与 f109 同值，近10日涨幅标为未获取"
 
     if args.json:
         payload = {

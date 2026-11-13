@@ -187,13 +187,30 @@ def build_payload(code, source="auto"):
             result = fetch(code) if candidate == "eastmoney" else fetch_sina(code)
             if result.get("latest_day") is None and not result.get("main_5d"):
                 raise RuntimeError("接口无数据")
+            available_days = len(result.get("main_5d") or [])
+            complete = available_days >= 5
+            if source == "auto" and candidate == "eastmoney" and not complete:
+                raise RuntimeError(
+                    "东财近5日序列仅 {} 日，切换到备用源".format(available_days)
+                )
+            limitations = []
+            if not complete:
+                limitations.append(
+                    "近5日主力序列仅获取 {} 日，不能作为完整趋势".format(
+                        available_days
+                    )
+                )
             return {
                 "code": code,
                 "name": result.get("name"),
                 "latest_day": result.get("latest_day"),
                 "main_5d": result.get("main_5d") or [],
+                "main_5d_available_days": available_days,
+                "main_5d_complete": complete,
                 "source": candidate,
                 "source_name": SOURCE_NAMES[candidate],
+                "fallback_reason": "；".join(errors) if errors else None,
+                "limitations": limitations,
                 "note": "数据来源：{}（单位：元）".format(SOURCE_NAMES[candidate]),
             }
         except Exception as exc:  # noqa: BLE001 主源失败切备用源，两源都失败才报错
@@ -224,7 +241,9 @@ def print_text(code, payload):
     print("-" * 84)
     main5 = payload["main_5d"]
     if main5:
-        print("近5日主力净流入：")
+        complete = payload.get("main_5d_complete")
+        label = "近5日主力净流入" if complete else "近期主力净流入（序列不完整）"
+        print("{}：".format(label))
         total = 0
         for r in main5:
             total += r["main"] or 0
@@ -235,6 +254,8 @@ def print_text(code, payload):
     print("=" * 84)
     print("注：数据来源为{}；单位万元，正=净流入，负=净流出。不构成投资建议。".format(
         payload.get("source_name") or "-"))
+    for limitation in payload.get("limitations") or []:
+        print("注：{}".format(limitation))
 
 
 def main():

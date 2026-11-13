@@ -89,6 +89,25 @@ def to_float(value):
         return None
 
 
+def clear_duplicate_gain10(rows):
+    """东财 f109/f160 整批同值时，10 日字段标为不可用。"""
+    pairs = [
+        (row.get("change5_pct"), row.get("change10_pct"))
+        for row in rows
+        if row.get("change5_pct") is not None
+        and row.get("change10_pct") is not None
+    ]
+    duplicate = (
+        len(pairs) >= 2
+        and all(five == ten for five, ten in pairs)
+    )
+    if duplicate:
+        for row in rows:
+            row["change10_pct"] = None
+            row["change10_duplicate"] = True
+    return duplicate
+
+
 def to_yuan_is_wan(value):
     num = to_float(value)
     return None if num is None else num * 10000.0

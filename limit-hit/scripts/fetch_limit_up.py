@@ -27,10 +27,12 @@ yesterday_open_close（开盘与尾盘分类汇总，含分行业）与 industry
 """
 
 import argparse
+import collections
 import json
 import os
 import sys
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -159,6 +161,25 @@ def fetch_pool(kind, date_str):
     raise RuntimeError("东方财富涨停板接口（{}）拉取失败：{}".format(kind, last_error))
 
 
+def fetch_related_pools(base_date, previous_date):
+    """并发取当日炸板/跌停和昨日炸板/跌停，当日及昨日涨停池沿用 resolve_dates 结果。"""
+    jobs = {
+        "dt": ("dt", base_date),
+        "zb": ("zb", base_date),
+        "prev_zb": ("zb", previous_date),
+        "prev_dt": ("dt", previous_date),
+    }
+    result = {}
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(fetch_pool, kind, date): key
+            for key, (kind, date) in jobs.items()
+        }
+        for future in as_completed(futures):
+            result[futures[future]] = future.result()
+    return result
+
+
 def pool_has_rows(payload):
     return bool(payload.get("pool")) or (payload.get("tc") or 0) > 0
 
@@ -253,7 +274,9 @@ def normalize_pool_row(raw):
         "board_count": int(raw.get("lbc")) if raw.get("lbc") else None,
         "first_seal": fmt_time(raw.get("fbt")),
         "last_seal": fmt_time(raw.get("lbt")),
-        "break_count": int(raw.get("zbc")) if raw.get("zbc") else None,
+        "break_count": (
+            int(raw.get("zbc")) if raw.get("zbc") is not None else None
+        ),
         "seal_fund_yi": to_yi_or_none(raw.get("fund")),
         "industry": str(raw.get("hybk") or "-"),
         "zt_stat": fmt_zt_stat(raw.get("zttj")),
@@ -288,6 +311,15 @@ def resolve_dates(date_arg):
     return base_date, prev_day, base_payload, prev_payload, status
 
 
+def resolve_quote_date(quotes):
+    """返回真实行情交易日；没有行情时必须保持未获取。"""
+    return next(
+        (quote["quote_date"] for quote in quotes.values()
+         if quote.get("quote_date")),
+        None,
+    )
+
+
 def industry_distribution(zt_rows):
     dist = {}
     for r in zt_rows:
@@ -302,6 +334,23 @@ def industry_distribution(zt_rows):
             "pct": round(cnt * 100.0 / total, 1),
         })
     return out
+
+
+def board_structure(rows):
+    """汇总当前板数结构；缺失板数单列，不能当作一板。"""
+    counts = collections.Counter(
+        str(row["board_count"]) if row.get("board_count") else "未获取"
+        for row in rows
+    )
+    known = [
+        row["board_count"] for row in rows
+        if row.get("board_count") is not None
+    ]
+    return {
+        "max_board": max(known, default=None),
+        "two_plus_count": sum(value >= 2 for value in known),
+        "board_counts": dict(sorted(counts.items())),
+    }
 
 
 def one_word_check(rows, quotes):
@@ -366,7 +415,7 @@ def prev_zt_today_rows(prev_zt_rows, quotes, zt_codes, dt_codes):
             "code": r["code"],
             "name": r["name"],
             "industry": r["industry"],
-            "board_count": r["board_count"] or 1,
+            "board_count": r.get("board_count"),
             "last_amount_yi": r["amount_yi"],
             "today_open": open_px,
             "prev_close": prev_close,
@@ -419,7 +468,9 @@ def open_close_by_industry(rows, min_sample=2):
 
 def board_bucket(board_count):
     """板数分档：一板 / 二板 / 三板 / 四板及以上。"""
-    n = board_count or 1
+    if board_count is None:
+        return "未获取"
+    n = board_count
     if n <= 1:
         return "一板"
     if n == 2:
@@ -442,7 +493,9 @@ def industry_promotion_stats(prev_zt_rows, zt_rows, zb_rows):
             "promote_count": 0,
             "today_zb_count": 0,
             "max_board": 0,
-            "board_counts": {"一板": 0, "二板": 0, "三板": 0, "四板及以上": 0},
+            "board_counts": {
+                "一板": 0, "二板": 0, "三板": 0, "四板及以上": 0, "未获取": 0,
+            },
         })
 
     prev_codes_by_industry = {}
@@ -454,7 +507,8 @@ def industry_promotion_stats(prev_zt_rows, zt_rows, zb_rows):
         item = bucket(r["industry"])
         item["today_zt_count"] += 1
         item["board_counts"][board_bucket(r["board_count"])] += 1
-        item["max_board"] = max(item["max_board"], r["board_count"] or 1)
+        if r.get("board_count") is not None:
+            item["max_board"] = max(item["max_board"], r["board_count"])
     for r in zb_rows:
         bucket(r["industry"])["today_zb_count"] += 1
 
@@ -486,7 +540,11 @@ def render_text(base, prev, zt_rows, zb_rows, dt_rows, prev_zt_rows,
         close_rate = zt_n * 100.0 / (zt_n + zb_n)
     if prev_zt_n + prev_zb_n > 0:
         prev_close_rate = prev_zt_n * 100.0 / (prev_zt_n + prev_zb_n)
-    prev_max_board = max((r["board_count"] or 1 for r in prev_zt_rows), default=None)
+    prev_max_board = max(
+        (r["board_count"] for r in prev_zt_rows
+         if r.get("board_count") is not None),
+        default=None,
+    )
 
     lines = []
     lines.append("# 涨停板数据报告（数据日期 {} · 行情日期 {} · 生成时间 {}）".format(
@@ -733,12 +791,13 @@ def main():
         notes.append("{} 涨停池为空或接口无该日数据；若该日为非交易日请改用交易日，"
                      "否则请稍后重试（接口只覆盖约近 30 个交易日）。".format(base_str))
 
-    zt = fetch_pool("zt", base_str)
-    dt = fetch_pool("dt", base_str)
-    zb = fetch_pool("zb", base_str)
-    prev_zt = fetch_pool("zt", prev_str)
-    prev_zb = fetch_pool("zb", prev_str)
-    prev_dt = fetch_pool("dt", prev_str)
+    zt = base_payload
+    prev_zt = prev_payload
+    related = fetch_related_pools(base_str, prev_str)
+    dt = related["dt"]
+    zb = related["zb"]
+    prev_dt = related["prev_dt"]
+    prev_zb = related["prev_zb"]
 
     zt_rows = [r for r in (normalize_pool_row(x) for x in zt["pool"]) if r]
     zb_rows = [r for r in (normalize_pool_row(x) for x in zb["pool"]) if r]
@@ -753,15 +812,18 @@ def main():
     prev_zt_n = len(prev_zt_rows)
     prev_zb_n = len(prev_zb_rows)
     prev_dt_n = len(prev_dt_rows)
-    prev_max_board = max((r["board_count"] or 1 for r in prev_zt_rows), default=None)
+    prev_max_board = max(
+        (r["board_count"] for r in prev_zt_rows
+         if r.get("board_count") is not None),
+        default=None,
+    )
 
     # 高标梯队按板数降序、同板数按首封时间：文本表、JSON 与「一字」核验取同一批前 15 只
     board_rows = [r for r in zt_rows if (r["board_count"] or 1) >= 2]
     board_rows.sort(key=lambda r: (-(r["board_count"] or 0), r["first_seal"] or ""))
     one_word_codes = sorted(set(r["code"] for r in board_rows[:15]))
     quotes = fetch_quotes(one_word_codes)
-    quote_date = next((q["quote_date"] for q in quotes.values() if q["quote_date"]),
-                      base_str)
+    quote_date = resolve_quote_date(quotes)
 
     if prev_zt_rows:
         perf_codes = sorted(set(r["code"] for r in prev_zt_rows))
@@ -780,6 +842,7 @@ def main():
         today_codes = set(r["code"] for r in zt_rows)
         dt_codes = set(r["code"] for r in dt_rows)
         today_rows = prev_zt_today_rows(prev_zt_rows, quotes, today_codes, dt_codes)
+        board_stats = board_structure(zt_rows)
         payload = {
             "base_date": base_str,
             "prev_date": prev_str,
@@ -798,6 +861,9 @@ def main():
                 if zt_n + zb_n else None,
                 "prev_seal_rate_pct": round(prev_zt_n * 100.0 / (prev_zt_n + prev_zb_n), 1)
                 if prev_zt_n + prev_zb_n else None,
+                "max_board": board_stats["max_board"],
+                "two_plus_count": board_stats["two_plus_count"],
+                "board_counts": board_stats["board_counts"],
             },
             "board_levels": board_rows[:15],
             "zt_rows": zt_rows,

@@ -4,7 +4,7 @@
 
 用法:
     python fetch_sector_boards.py [--type industry|concept|all] [--sort change|flow|amount|gain5|gain10]
-                                  [--top N] [--min-up N] [--search 关键词]
+                                  [--top N] [--min-up N] [--search 关键词 ...]
                                   [--source auto|eastmoney|tencent] [--json]
 
 输出: 板块行情榜——按所选排序返回 Top N 行业/概念板块，含板块指数、当日涨跌幅、
@@ -29,6 +29,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import http_util  # noqa: E402 与脚本同目录的直连网络层
+import fallback_sources as fb  # noqa: E402
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -261,6 +262,7 @@ def normalize_eastmoney_rows(diff):
             "ts": to_float(raw.get("f124")),
             "quote_date": None,
         })
+    fb.clear_duplicate_gain10(rows)
     return rows
 
 
@@ -375,13 +377,26 @@ def fetch_tencent_rows(args):
     return normalize_tencent_rows(fetch_tencent_boards(args.type))
 
 
+def search_terms(search):
+    if isinstance(search, str):
+        search = [search]
+    return [
+        str(value).strip().lower()
+        for value in search or []
+        if str(value).strip()
+    ]
+
+
 def filter_rows(rows, min_up, search):
     if min_up > 0:
         rows = [r for r in rows
                 if r["up_count"] is not None and r["up_count"] >= min_up]
-    keyword = (search or "").strip().lower()
-    if keyword:
-        rows = [r for r in rows if keyword in r["name"].lower()]
+    keywords = search_terms(search)
+    if keywords:
+        rows = [
+            r for r in rows
+            if any(keyword in r["name"].lower() for keyword in keywords)
+        ]
     return rows
 
 
@@ -393,25 +408,31 @@ def sort_rows(rows, sort):
 
 def no_match_reason(rows, args):
     """按板块名过滤后为空时给出可用提示：列出最接近的板块名，不静默兜底。"""
-    keyword = args.search.strip()
-    if not keyword:
+    keywords = search_terms(args.search)
+    if not keywords:
         return "过滤后无板块（检查 --type / --min-up）"
-    matched = [r for r in rows if keyword.lower() in r["name"].lower()]
+    keyword_text = "、".join(keywords)
+    matched = [
+        r for r in rows
+        if any(keyword in r["name"].lower() for keyword in keywords)
+    ]
     if matched:
         return ("名称包含“{kw}”的板块有 {n} 个（{names}），但它们都被 --min-up {mu} 等过滤条件"
                 "剔除了；请放宽 --min-up 后重试（本数据源共 {total} 个板块）").format(
-                    kw=keyword, n=len(matched),
+                    kw=keyword_text, n=len(matched),
                     names="、".join(r["name"] for r in matched[:5]),
                     mu=args.min_up, total=len(rows))
-    tips = difflib.get_close_matches(keyword, [r["name"] for r in rows], n=5, cutoff=0.3)
+    tips = difflib.get_close_matches(
+        keywords[0], [r["name"] for r in rows], n=5, cutoff=0.3
+    )
     if tips:
         return ("没有名称包含“{kw}”的板块（本数据源共 {n} 个板块）；"
                 "最接近的板块名：{tips}（改用近似板块时必须在报告里写明替代关系与数据源）").format(
-                    kw=keyword, n=len(rows), tips="、".join(tips))
+                    kw=keyword_text, n=len(rows), tips="、".join(tips))
     return ("没有名称包含“{kw}”的板块（本数据源共 {n} 个板块），也没有相近名称；"
             "可换关键词、加 --type all（概念板块需 --type concept/all）重试，"
             "或等东财板块接口恢复").format(
-                kw=keyword, n=len(rows))
+                kw=keyword_text, n=len(rows))
 
 
 def prepare_rows(args):
@@ -436,8 +457,9 @@ def prepare_rows(args):
             if source == "tencent":
                 fill_tencent_multiday(rows)  # 展示行补齐 10 日涨幅与最新交易日
             if source == "eastmoney" and rows:
-                pairs = [(r["change5_pct"], r["change10_pct"]) for r in rows]
-                meta["same_5_10"] = all(a is not None and a == b for a, b in pairs)
+                meta["same_5_10"] = any(
+                    r.get("change10_duplicate") for r in rows
+                )
             return source, rows, meta
         except Exception as exc:  # noqa: BLE001 主源失败切备用源，两源全失败才报错
             errors.append("{}：{}".format(SOURCE_NAMES[source], exc))
@@ -479,8 +501,10 @@ def render_text(rows, args, source, quote_time, meta=None):
     if args.min_up > 0:
         lines.append("口径：上涨家数低于 {min_up} 的板块已剔除。数据未经验证，仅供板块扫描。".format(
             min_up=args.min_up))
-    if args.search.strip():
-        lines.append("关键词：仅显示名称包含“{kw}”的板块。".format(kw=args.search.strip()))
+    keywords = search_terms(args.search)
+    if keywords:
+        lines.append("关键词：仅显示名称包含“{kw}”的板块。".format(
+            kw="、".join(keywords)))
     if len(rows) < args.top:
         lines.append("注：过滤后实际返回 {n} 个板块（请求 {top} 个）。".format(
             n=len(rows), top=args.top))
@@ -517,8 +541,8 @@ def main():
     ap.add_argument("--top", type=int, default=20, help="榜单数量（默认 20）")
     ap.add_argument("--min-up", type=int, default=0,
                     help="最低上涨家数过滤，如 5 表示剔除上涨家数<5 的小板块（默认不过滤）")
-    ap.add_argument("--search", type=str, default="",
-                    help="按板块名称关键词定位（如 --search 液冷；会翻完整板块列表后过滤）")
+    ap.add_argument("--search", nargs="+", default=[],
+                    help="按板块名称关键词定位，可一次传多个题材；会扫描一次板块列表")
     ap.add_argument("--source", choices=sorted(SOURCE_ORDER), default="auto",
                     help="数据源：auto 先东财、不可用切腾讯（默认）；可强制 eastmoney / tencent")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
@@ -542,7 +566,7 @@ def main():
             "sort_name": SORT_NAMES[args.sort],
             "top": args.top,
             "min_up": args.min_up,
-            "search": args.search.strip(),
+            "search": search_terms(args.search),
             "source": source,
             "source_name": SOURCE_NAMES[source],
             "quote_time": quote_time,

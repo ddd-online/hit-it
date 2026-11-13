@@ -15,10 +15,12 @@ import collections
 import json
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+CN_TZ = timezone(timedelta(hours=8))
+BOARD_PERMISSION = "沪深主板"
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -58,6 +60,22 @@ def build_limit_pool_path(data_date):
     return Path.cwd() / "report" / "涨停池" / "{}.json".format(data_date)
 
 
+def is_mainboard_code(code):
+    return str(code or "").startswith((
+        "sh600", "sh601", "sh603", "sh605",
+        "sz000", "sz001", "sz002", "sz003",
+    ))
+
+
+def select_candidates(rows):
+    """固定板块权限：只保留当日一板、二板中的沪深主板股票。"""
+    return [
+        row for row in rows
+        if row.get("board_count") in (1, 2)
+        and is_mainboard_code(row.get("code"))
+    ]
+
+
 def load_limit_pool(path, data_date):
     """读取指定日期的涨停池；文件损坏或日期不符时直接报错，避免覆盖用户数据。"""
     if not path.exists():
@@ -77,6 +95,8 @@ def market_closed(snapshot, data_date, quote_date):
     """行情日期已结束且当日行情已取到时，才允许保存当日涨停池。"""
     if quote_date != compact_date(data_date):
         return False
+    if snapshot.tzinfo is not None:
+        snapshot = snapshot.astimezone(CN_TZ)
     if data_date < snapshot.date().isoformat():
         return True
     return data_date == snapshot.date().isoformat() and (snapshot.hour, snapshot.minute) >= (15, 0)
@@ -106,6 +126,8 @@ def normalize_pool_stock(row):
         "break_count": row.get("break_count", row.get("open_count")),
         "seal_fund_yi": None if seal_fund_yi is None else round(seal_fund_yi, 2),
         "zt_stat": row.get("zt_stat"),
+        "board_days": row.get("board_days"),
+        "board_window_count": row.get("board_window_count"),
         "one_word": row.get("one_word"),
         "themes": row.get("themes") or [],
     }
@@ -252,7 +274,9 @@ def theme_summary(current_rows, previous_rows, concepts):
             "board_counts": dict(sorted(boards.items())),
             "current_codes": [row["code"] for row in rows],
             "candidate_codes": [
-                row["code"] for row in rows if row.get("board_count") in (1, 2)
+                row["code"] for row in rows
+                if row.get("board_count") in (1, 2)
+                and is_mainboard_code(row.get("code"))
             ],
         })
     return sorted(
@@ -288,8 +312,60 @@ def find_yesterday_high(previous_rows, current_data):
     return {"board_count": max_board, "stocks": output}
 
 
+def mode_feedback(previous_rows, current_data):
+    """按昨日板数计算一进二、二进三反馈，缺少板数的样本不猜测。"""
+    performance = {
+        row["code"]: row
+        for row in (current_data.get("yesterday_performance") or {}).get("rows", [])
+    }
+
+    def summarize(mode_name, board_count):
+        previous_group = [
+            row for row in previous_rows
+            if row.get("board_count") == board_count
+        ]
+        rows = [
+            performance[row["code"]]
+            for row in previous_group
+            if row["code"] in performance
+        ]
+        gaps = [row["gap_pct"] for row in rows if row.get("gap_pct") is not None]
+        closes = [
+            row["today_pct"] for row in rows
+            if row.get("today_pct") is not None
+        ]
+        promoted = sum(bool(row.get("continue_limit")) for row in rows)
+        high_open = sum(value > 0 for value in gaps)
+        return {
+            "mode": mode_name,
+            "sample": len(previous_group),
+            "quoted": len(gaps),
+            "matched_performance": len(rows),
+            "promoted": promoted,
+            "promotion_rate_pct": (
+                round(promoted * 100.0 / len(previous_group), 2)
+                if previous_group else None
+            ),
+            "high_open": high_open,
+            "high_open_rate_pct": (
+                round(high_open * 100.0 / len(gaps), 2) if gaps else None
+            ),
+            "avg_open_pct": (
+                round(sum(gaps) / len(gaps), 2) if gaps else None
+            ),
+            "avg_close_pct": (
+                round(sum(closes) / len(closes), 2) if closes else None
+            ),
+        }
+
+    return {
+        "one_to_two": summarize("一进二", 1),
+        "two_to_three": summarize("二进三", 2),
+    }
+
+
 def build_payload():
-    snapshot = datetime.now().astimezone()
+    snapshot = datetime.now(CN_TZ)
     current = run_json("fetch_limit_up.py", "--json")
     data_date = "{}-{}-{}".format(
         current["base_date"][:4], current["base_date"][4:6], current["base_date"][6:])
@@ -322,6 +398,10 @@ def build_payload():
             previous_rows = history.get("rows") or []
             previous_source_name = history.get("source") or "同花顺公开历史涨停池"
             previous_limitations = history.get("limitations") or []
+            previous_limitations.append(
+                "同花顺历史池只提供窗口涨停次数，部分当前连板数未获取；"
+                "未确认板数的样本不得进入一进二、二进三和最高板结论"
+            )
 
     codes_to_hydrate = {
         row["code"] for row in current_rows
@@ -386,15 +466,19 @@ def build_payload():
 
     themes = theme_summary(current_rows, previous_rows, concepts)
     yesterday_high = find_yesterday_high(previous_rows, current)
+    feedback = mode_feedback(previous_rows, current)
 
-    candidates = [
+    one_two_candidates = [
         row for row in current_rows
         if row.get("board_count") in (1, 2)
     ]
+    candidates = select_candidates(current_rows)
+    board_permission_excluded = len(one_two_candidates) - len(candidates)
     metric_payload = run_json(
         "fetch_stock_metrics.py",
         "--codes", ",".join(row["code"] for row in candidates),
         "--days", "120",
+        "--workers", "12",
         "--json",
     ) if candidates else {"rows": []}
     metrics = {row["code"]: row for row in metric_payload.get("rows", [])}
@@ -424,12 +508,29 @@ def build_payload():
             warnings.append("日K或筹码未获取")
         row["warnings"] = warnings
 
+    quality_summary = collections.Counter(
+        (row.get("metrics") or {}).get("quality") or "unavailable"
+        for row in candidates
+    )
+    limitations = [
+        "本脚本只计算，不做题材取舍或可打板判断",
+        "题材来自当前 F10 精确概念，历史归属可能有变动",
+        "筹码为日K+换手率推演值",
+    ]
+    if quality_summary["degraded"]:
+        limitations.append(
+            "{} 只候选的换手率与筹码使用近似值，筹码结构只能作为降级证据".format(
+                quality_summary["degraded"])
+        )
+
     return {
         "generated_at": snapshot.isoformat(timespec="seconds"),
         "data_date": data_date,
         "report_path": str(build_report_path(data_date)),
         "previous_date": previous_date,
         "quote_date": current.get("quote_date"),
+        "board_permission": BOARD_PERMISSION,
+        "board_permission_excluded_count": board_permission_excluded,
         "previous_source": previous_source,
         "previous_pool_report": str(previous_path),
         "previous_pool_generated": previous_generated,
@@ -439,22 +540,21 @@ def build_payload():
         "market": current.get("overview"),
         "yesterday_open": (current.get("yesterday_open_close") or {}).get("overall"),
         "yesterday_highest_board": yesterday_high,
+        "mode_feedback": feedback,
+        "metric_quality_summary": dict(sorted(quality_summary.items())),
         "themes": themes,
         "candidates": candidates,
-        "limitations": [
-            "本脚本只计算，不做题材取舍或可打板判断",
-            "题材来自当前 F10 精确概念，历史归属可能有变动",
-            "筹码为日K+换手率推演值",
-        ],
+        "limitations": limitations,
     }
 
 
-def build_compact_payload(payload):
+def build_compact_payload(payload, theme_limit=30):
     """把完整预计算压缩为模型决策所需字段，保留原始 --json 供审计。"""
     def number(value, digits=2):
         value = to_float(value)
         return None if value is None else round(value, digits)
 
+    all_themes = payload.get("themes") or []
     themes = [
         {
             "theme": row.get("theme"),
@@ -465,7 +565,7 @@ def build_compact_payload(payload):
             "board_counts": row.get("board_counts"),
             "candidate_codes": row.get("candidate_codes"),
         }
-        for row in payload.get("themes") or []
+        for row in all_themes[:max(0, theme_limit)]
     ]
     candidates = []
     for row in payload.get("candidates") or []:
@@ -520,6 +620,7 @@ def build_compact_payload(payload):
                 "above_avg_pct": number(chips.get("above_avg_pct")),
             } if chips else None,
             "metric_source": metric.get("source"),
+            "metric_quality": metric.get("quality"),
             "metric_limitations": metric.get("limitations") or [],
             "warnings": row.get("warnings") or [],
         })
@@ -537,6 +638,9 @@ def build_compact_payload(payload):
         "data_date": payload.get("data_date"),
         "quote_date": payload.get("quote_date"),
         "previous_date": payload.get("previous_date"),
+        "board_permission": payload.get("board_permission"),
+        "board_permission_excluded_count": payload.get(
+            "board_permission_excluded_count"),
         "report_path": payload.get("report_path"),
         "previous_source": payload.get("previous_source"),
         "previous_pool_report": payload.get("previous_pool_report"),
@@ -547,6 +651,10 @@ def build_compact_payload(payload):
         "market": payload.get("market"),
         "yesterday_open": payload.get("yesterday_open"),
         "yesterday_highest_board": payload.get("yesterday_highest_board"),
+        "mode_feedback": payload.get("mode_feedback"),
+        "metric_quality_summary": payload.get("metric_quality_summary"),
+        "theme_total_count": len(all_themes),
+        "themes_truncated": len(themes) < len(all_themes),
         "themes": themes,
         "candidates": candidates,
         "limitations": payload.get("limitations") or [],
@@ -560,6 +668,9 @@ def print_text(payload):
         payload["data_date"], payload.get("quote_date") or "-",
         payload.get("generated_at") or "-"))
     print("报告文件：{}".format(payload.get("report_path") or "-"))
+    print("板块权限：{}（权限外 1/2 板排除 {} 只）".format(
+        payload.get("board_permission"),
+        payload.get("board_permission_excluded_count")))
     print("=" * 112)
     print("昨日来源：{}".format(payload["previous_source"]))
     print("昨日涨停池：{}（新生成：{}）".format(
@@ -572,10 +683,20 @@ def print_text(payload):
     print("市场：涨停 {} / 跌停 {} / 炸板 {} / 封板率 {}%".format(
         market.get("zt_count"), market.get("dt_count"), market.get("zb_count"),
         market.get("seal_rate_pct")))
+    print("连板高度：最高 {} 板 / 2板及以上 {} 家 / 板数分布 {}".format(
+        market.get("max_board"), market.get("two_plus_count"),
+        json.dumps(market.get("board_counts") or {}, ensure_ascii=False)))
     opening = payload.get("yesterday_open") or {}
     print("昨日涨停今日开盘：高开 {} / 平开 {} / 低开 {} / 平均 {}%".format(
         opening.get("up_open"), opening.get("flat_open"),
         opening.get("down_open"), opening.get("avg_gap_pct")))
+    feedback = payload.get("mode_feedback") or {}
+    for key in ("one_to_two", "two_to_three"):
+        row = feedback.get(key) or {}
+        print("{}：样本 {} / 晋级率 {}% / 高开率 {}% / 平均开盘 {}%".format(
+            row.get("mode"), row.get("sample"),
+            row.get("promotion_rate_pct"), row.get("high_open_rate_pct"),
+            row.get("avg_open_pct")))
     high = payload.get("yesterday_highest_board")
     if high:
         print("昨日最高板：{} 板 {}".format(high["board_count"], "、".join(
@@ -605,6 +726,10 @@ def print_text(payload):
             "-" if row.get("seal_fund_ratio_pct") is None else "{:.2f}".format(row["seal_fund_ratio_pct"]),
         ))
     print("\n" + "\n".join("注：{}".format(item) for item in payload["limitations"]))
+    quality = payload.get("metric_quality_summary") or {}
+    if quality:
+        print("注：个股指标质量 {}".format(json.dumps(
+            quality, ensure_ascii=False, sort_keys=True)))
 
 
 def main():

@@ -38,7 +38,7 @@ hit-it/
 
 ## 快速开始
 
-项目根目录适合开发和测试；实际候选报告、涨停池文件和 `ACCOUNT.md` 从当前工作目录读取。因此生成交易工作区报告时，应先进入目标工作区，再调用本项目的脚本。
+项目根目录适合开发和测试；实际候选报告和涨停池文件从当前工作目录读写。因此生成交易工作区报告时，应先进入目标工作区，再调用本项目的脚本。板块权限固定为沪深主板。
 
 PowerShell 示例：
 
@@ -47,7 +47,7 @@ cd <目标交易工作区>
 python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 ```
 
-日常运行使用 `--compact` 获取模型友好的单行 JSON；需要审计完整原始字段时使用 `--json`，去掉两者输出文本表。脚本返回的 `report_path` 是唯一报告路径，通常为：
+日常运行使用 `--compact` 获取模型友好的单行 JSON，默认列前 30 个题材；需要审计完整题材和原始字段时使用 `--json`，去掉两者输出文本表。脚本返回的 `report_path` 是唯一报告路径，通常为：
 
 ```text
 report/打板候选/<data_date>.md
@@ -68,7 +68,7 @@ python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 2. 对入围题材定位概念板块：
 
 ```powershell
-python D:\github\hit-it\limit-hit\scripts\fetch_sector_boards.py --type concept --search 机器人 --top 20 --json
+python D:\github\hit-it\limit-hit\scripts\fetch_sector_boards.py --type concept --search 机器人 人工智能 --top 20 --json
 ```
 
 3. 下钻板块成分股：
@@ -85,7 +85,7 @@ python D:\github\hit-it\limit-hit\scripts\fetch_capital_flow.py sh600410 --json
 python D:\github\hit-it\limit-hit\scripts\fetch_stock_structure.py sh600410 --json
 ```
 
-`prepare_candidates.py` 负责可复现的数据装配和指标计算；题材取舍、消息核验、评分与最终状态由运行 SKILL 的模型完成。
+一条命令可同时定位多个题材，复用同一份板块扫描结果。`prepare_candidates.py` 负责可复现的数据装配和指标计算；题材取舍、消息核验、评分与最终状态由运行 SKILL 的模型完成。
 
 ## 脚本说明
 
@@ -101,6 +101,7 @@ python D:\github\hit-it\limit-hit\scripts\fetch_stock_structure.py sh600410 --js
 | `fetch_news.py` | 东方财富新闻与公告 |
 | `fetch_capital_flow.py` | 个股主力及超大单/大单/中单/小单资金流向 |
 | `fetch_quote.py` | 腾讯个股行情快照与日K |
+| `backtest_limit_hit.py` | 2026 年以来的结构代理回测，默认本金 6000 元 |
 | `fallback_sources.py` | 腾讯、新浪、东财 F10 等备用数据源 |
 | `http_util.py` | 强制直连的公共网络层 |
 
@@ -109,9 +110,11 @@ python D:\github\hit-it\limit-hit\scripts\fetch_stock_structure.py sh600410 --js
 - 涨停池主要来自东方财富 `push2ex`，涨停池不含 ST 与科创板。
 - 概念、股东户数和板块成分股使用东方财富 F10 口径。
 - 个股日K优先东方财富；不可用时回退腾讯，近似换手率必须标 `≈`。
+- 候选会输出 `metric_quality`；`degraded` 的筹码只能作为辅助证据，不能按精确值计分。
 - 板块行情优先东方财富；不可用时回退腾讯，板块代码和资金口径会不同。
+- 东财 `f109` 与 `f160` 整批同值时，10 日涨幅输出 `null`。
 - 个股资金流优先东方财富；不可用时回退新浪，拆分字段标“未获取”。
-- 历史涨停成功池可由同花顺回补，但不包含炸板池、跌停池和市场封板率。
+- 历史涨停成功池可由同花顺回补，但不包含炸板池、跌停池和市场封板率；“几天几板”不是当前连板数。
 - 跨数据源数值不可放在同一比较表中混用，报告必须标注实际数据源与口径。
 - 筹码分布是日K换手率衰减与三角分布推演值，不是券商原始筹码。
 

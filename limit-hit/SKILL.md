@@ -22,10 +22,9 @@ description: 筛选 A 股一进二、二进三打板候选，复用自维护涨�
 3. 收盘后或凌晨也允许运行，用于复盘和下一交易日计划；此时必须使用最近交易日作为 `data_date`，运行口径写“收盘复盘/盘后计划”，不能把执行日期当数据日期。
 4. 报告必须标“盘中快照”或“收盘复盘”及执行时间；盘中数据不能被收盘字段替代。
 5. 当日涨停始终由技能内 `scripts/fetch_limit_up.py --json` 现场拉取，不拿旧报告冒充当日。
-6. 昨日涨停池固定复用 `report/涨停池/<previous_date>.json`；文件不存在时，用当日数据随带的昨日涨停池自行生成，缺失时再用 `fetch_limit_up_history.py --date <previous_date> --json` 回补。已有文件不得覆盖。
-7. 若存在 `ACCOUNT.md`，只读取“板块权限”用于过滤无法交易的代码；不存在时按主板、非 ST 的保守默认，并在报告注明。
-8. 不读取 `MUST.md`、`NOTES.md`、`POSITION.md` 或个股目录，不维护观察池。
-9. 报告文件必须写入 `report/打板候选/<data_date>.md`：文件名日期取自 `prepare_candidates.py` 的 `data_date`，不是本机执行日期。凌晨执行、跨日执行或非交易日执行时，仍使用行情实际数据日期；同一数据日期重跑覆盖更新。脚本输出的 `report_path` 是唯一目标路径。
+6. 昨日涨停池固定复用 `report/涨停池/<previous_date>.json`；文件不存在时，用当日数据随带的昨日涨停池自行生成，缺失时再用 `fetch_limit_up_history.py --date <previous_date> --json` 回补。已有文件不得覆盖。历史池的“几天几板”只是窗口涨停次数，当前连板数为空时不得推算一进二或二进三。
+7. 板块权限固定为沪深主板：沪市 `600/601/603/605`，深市 `000/001/002/003`；创业板、科创板和北交所股票不进入候选，并在报告注明。
+8. 报告文件必须写入 `report/打板候选/<data_date>.md`：文件名日期取自 `prepare_candidates.py` 的 `data_date`，不是本机执行日期。凌晨执行、跨日执行或非交易日执行时，仍使用行情实际数据日期；同一数据日期重跑覆盖更新。脚本输出的 `report_path` 是唯一目标路径。
 
 ## 核心流程
 
@@ -55,7 +54,10 @@ python limit-hit/scripts/prepare_candidates.py --compact
 - 昨日已有同题材涨停，今日仍有晋级；或
 - 题材内出现 2 板以上核心，且未涨停股同步走强。
 
-只对入围题材调用 `scripts/fetch_sector_boards.py --type concept --search <题材>` 定位 BK 与板块行，再调用 `scripts/fetch_sector_leaders.py --board <BK> --top 300 --compact` 取扩散摘要和涨幅前列。需要逐股核验原始明细时改用 `--json`。只有涨停股上涨、题材内其余股票不跟，判“独涨题材”。
+先收集入围的 1–3 个题材名，只调用一次
+`scripts/fetch_sector_boards.py --type concept --search <题材1> <题材2> <题材3> --json`
+定位 BK 与板块行；再对每个 BK 调用
+`scripts/fetch_sector_leaders.py --board <BK> --top 300 --compact` 取扩散摘要。一次传入多个题材可复用同一份板块榜单，避免每题材重复扫描。需要逐股核验原始明细时改用 `--json`。只有涨停股上涨、题材内其余股票不跟，判“独涨题材”。
 
 题材强度与候选评分口径见 [references/selection-rules.md](references/selection-rules.md)。
 
@@ -82,18 +84,18 @@ python limit-hit/scripts/prepare_candidates.py --compact
 候选必须同时满足：
 
 - 当日 `board_count` 为 1 或 2；板数未获取则排除；
-- 非 ST、非退市整理、非停牌，且用户有该板块权限；
+- 沪深主板、非 ST、非退市整理、非停牌；
 - 当日不是全天一字或无法成交的封死板；收后报告可将其列为“强度证明”，不能列为“可打板”；
 - 未出现财务造假立案、重大减持正在进行、退市风险、监管处罚、业绩暴雷等可核验负事件；
 - 最新题材催化与个股消息通过网页搜索核验，并在报告中给出标题、来源、发布时间、链接。
 
-脚本已给出全部 1/2 板候选的封板、量比、开盘/最低价差、历史涨跌、均线和筹码字段。模型筛出每个题材的 1–2 只后，只补取消息与资金：
+脚本已给出全部 1/2 板候选的封板、量比、开盘/最低价差、历史涨跌、均线和筹码字段，并给出 `metric_quality`。`degraded` 表示换手率与筹码使用近似值，只能作为辅助证据，不能据此认定“筹码结构优秀”。模型筛出每个题材的 1–2 只后，只补取消息与资金：
 
 - `scripts/fetch_news.py <code> --news 10 --ann 10`：最新催化、澄清、减持、诉讼、处罚；
 - `scripts/fetch_capital_flow.py <code>`：主力资金；
 - `scripts/fetch_stock_structure.py <code>`：只有脚本输出缺股东户数时才补取。
 
-A 股短线默认不把营收、净利、负债率、估值作为主要加减分项；基本面只保留硬风险检查：财务造假、立案调查、退市风险、重大违规、业绩预告暴雷、正在执行的大额减持或解禁。筹码字段是日 K + 换手率推演值，不是券商原始筹码；必须原样标注口径。股东户数有披露滞后，作为筹码辅助证据。
+A 股短线默认不把营收、净利、负债率、估值作为主要加减分项；基本面只保留硬风险检查：财务造假、立案调查、退市风险、重大违规、业绩预告暴雷、正在执行的大额减持或解禁。筹码字段是日 K + 换手率推演值，不是券商原始筹码；必须原样标注口径和 `metric_quality`。股东户数有披露滞后，作为筹码辅助证据。
 
 ### 5. 消息面搜索
 
@@ -142,9 +144,23 @@ A 股短线默认不把营收、净利、负债率、估值作为主要加减分
 
 - [references/runtime-context.md](references/runtime-context.md)：运行期预计算命令、输出字段，以及“脚本算数、模型决策”的边界；开始筛选前读。
 - [references/upstream-and-evaluation.md](references/upstream-and-evaluation.md)：昨日涨停池文件复用、生成规则、最高板硬规则与次日竞价口径；装配样本前读。
+- [references/backtest-report-template.md](references/backtest-report-template.md)：结构代理回测的固定报告模板；执行回测时使用。
 - [references/selection-rules.md](references/selection-rules.md)：硬过滤、题材强度、个股评分、情绪门槛、消息面与高开判据；筛选前读。
 - [references/report-template.md](references/report-template.md)：固定报告骨架；落盘前读。
 - [references/mobile-summary.md](references/mobile-summary.md)：报告生成后的手机端核心摘要格式；最终回复前读。
 - `$limit-judge`：参考集体高开、竞价量占比和最高板硬规则；本 SKILL 不调用它。
 
 本技能自带运行期取数脚本，全部位于 `scripts/`，不依赖其他 skill 或 `market-data` 目录。
+
+## 回测
+
+使用技能内脚本执行结构代理回测：
+
+```bash
+python limit-hit/scripts/backtest_limit_hit.py --start 20260101 --end YYYYMMDD --capital 6000
+```
+
+回测报告固定写入 `report/回测/涨停打板_<start>_<end>.md`，并沿用
+[references/backtest-report-template.md](references/backtest-report-template.md)。历史消息、公告负事件、
+盘中封板和板块扩散无法完整复现时必须标为“结构代理回测”，不能把结果宣传为完整 SKILL 实盘胜率。
+历史池不会把“11 天 6 板”当成 6 连板；回测脚本会用请求区间前的预热交易日恢复连续板数，预热仍无法确认连板的样本不参与候选。

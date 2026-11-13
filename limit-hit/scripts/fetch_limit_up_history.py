@@ -73,8 +73,8 @@ def decode_board(value):
     raw = to_int(value)
     if raw is None:
         return None, None
-    # 实测编码为“连板数 × 65536 + 统计天数”：
-    # 65537=首板、327689=9天5板、458759=7天7板。
+    # 实测编码为“窗口涨停次数 × 65536 + 窗口天数”，例如 11天6板。
+    # 该高位不是当前连续板数，不能直接用于一进二/二进三判定。
     return raw & 0xFFFF, raw >> 16
 
 
@@ -82,7 +82,13 @@ def normalize_row(row):
     code = fallback_sources.infer_sec_code(row.get("code"))
     if not code:
         return None
-    board_days, board_count = decode_board(row.get("high_days_value"))
+    board_days, board_window_count = decode_board(row.get("high_days_value"))
+    exact_board_count = (
+        board_window_count
+        if board_days and board_window_count
+        and board_days == board_window_count
+        else None
+    )
     reason = str(row.get("reason_type") or "").strip()
     return {
         "code": code,
@@ -93,7 +99,9 @@ def normalize_row(row):
         "market_type": row.get("market_type"),
         "limit_up_type": row.get("limit_up_type"),
         "board_days": board_days,
-        "board_count": board_count,
+        "board_window_count": board_window_count,
+        "board_count": exact_board_count,
+        "board_window": row.get("high_days"),
         "open_count": to_int(row.get("open_num")),
         "first_seal": fmt_time(row.get("first_limit_up_time")),
         "last_seal": fmt_time(row.get("last_limit_up_time")),
@@ -136,8 +144,8 @@ def print_text(date, rows):
     if not rows:
         print("数据未获取")
         return
-    print("{:<10}{:<10}{:>7}{:>7}{:>9}{:>8}{:>9}{:>12}  {}".format(
-        "代码", "名称", "现价", "涨幅%", "换手%", "板数", "开板", "封单(万元)", "题材原因"))
+    print("{:<10}{:<10}{:>7}{:>7}{:>9}{:>12}{:>7}{:>12}  {}".format(
+        "代码", "名称", "现价", "涨幅%", "换手%", "窗口统计", "开板", "封单(万元)", "题材原因"))
     print("-" * 105)
     for row in rows:
         print("{:<10}{:<10}{:>7.2f}{:>7.2f}{:>9.2f}{:>8}{:>9}{:>12.0f}  {}".format(
@@ -146,13 +154,13 @@ def print_text(date, rows):
             row.get("price") or 0,
             row.get("change_pct") or 0,
             row.get("turnover_pct") or 0,
-            row.get("board_count") or "-",
+            row.get("board_window") or "-",
             row.get("open_count") if row.get("open_count") is not None else "-",
             (row.get("seal_amount_yuan") or 0) / 1e4,
             row.get("reason_text") or "-",
         ))
     print("=" * 105)
-    print("注：仅涨停成功池，不含炸板池和跌停池；同花顺字段口径。")
+    print("注：仅涨停成功池，不含炸板池和跌停池；窗口统计不等于当前连续板数。")
 
 
 def main():
@@ -174,6 +182,7 @@ def main():
         "limitations": [
             "仅涨停成功池，不含炸板池和跌停池",
             "历史结果不包含逐笔行情与分时",
+            "high_days_value 表示窗口内涨停次数，仅天数等于板数时可确认当前连板",
         ],
     }
     if args.json:

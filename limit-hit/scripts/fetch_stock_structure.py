@@ -55,6 +55,7 @@ BOARD_URL = (
 CODE_RE = re.compile(r"^(sh|sz|bj)\d{6}$")
 
 _open = http_util.open_url
+_EASTMONEY_KLINE_UNAVAILABLE = False
 
 
 def http_get(url, referer=EASTMONEY_REFERER, timeout=25):
@@ -129,17 +130,19 @@ def parse_em_kline(lines):
 
 
 def fetch_kline(code, days, cutoff):
+    global _EASTMONEY_KLINE_UNAVAILABLE
     end = cutoff.replace("-", "") if cutoff else "20500101"
     url = EASTMONEY_KLINE_URL.format(
         secid=em_secid(code), days=max(days, 1), end=end)
-    try:
-        data = decode_json(http_get(url))
-        node = data.get("data") or {}
-        bars = parse_em_kline(node.get("klines") or [])
-        if bars:
-            return bars, "东方财富日K（精确换手率）", []
-    except Exception:  # noqa: BLE001 东财失败后按约定切腾讯日K
-        pass
+    if not _EASTMONEY_KLINE_UNAVAILABLE:
+        try:
+            data = decode_json(http_get(url))
+            node = data.get("data") or {}
+            bars = parse_em_kline(node.get("klines") or [])
+            if bars:
+                return bars, "东方财富日K（精确换手率）", []
+        except Exception:  # noqa: BLE001 东财失败后按约定切腾讯日K
+            _EASTMONEY_KLINE_UNAVAILABLE = True
 
     bars = []
     for row in fallback_sources.fetch_tencent_kline(code, days=max(days, 1)):
