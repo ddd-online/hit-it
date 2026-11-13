@@ -34,7 +34,7 @@ description: 筛选 A 股一进二、二进三打板候选，优先复用 limit-
 先运行：
 
 ```bash
-python limit-hit/scripts/prepare_candidates.py --json
+python limit-hit/scripts/prepare_candidates.py --compact
 ```
 
 该脚本一次性完成当日实拉、昨日报告复用或回补、概念聚合、梯队统计和候选指标计算。模型读取输出，不重复手工拉取或计算这些字段。具体边界见 [references/runtime-context.md](references/runtime-context.md)。
@@ -55,7 +55,7 @@ python limit-hit/scripts/prepare_candidates.py --json
 - 昨日已有同题材涨停，今日仍有晋级；或
 - 题材内出现 2 板以上核心，且未涨停股同步走强。
 
-只对入围题材调用 `scripts/fetch_sector_boards.py --type concept --search <题材>` 定位 BK 与板块行，再调用 `scripts/fetch_sector_leaders.py --board <BK> --top 300` 取全量成分股。未涨停股的上涨/下跌、平均涨幅、5 日涨幅和资金方向需要模型结合脚本结果判断。只有涨停股上涨、题材内其余股票不跟，判“独涨题材”。
+只对入围题材调用 `scripts/fetch_sector_boards.py --type concept --search <题材>` 定位 BK 与板块行，再调用 `scripts/fetch_sector_leaders.py --board <BK> --top 300 --compact` 取扩散摘要和涨幅前列。需要逐股核验原始明细时改用 `--json`。只有涨停股上涨、题材内其余股票不跟，判“独涨题材”。
 
 题材强度与候选评分口径见 [references/selection-rules.md](references/selection-rules.md)。
 

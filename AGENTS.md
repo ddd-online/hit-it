@@ -48,7 +48,7 @@ python -m unittest discover -s tests -v
 生成交易报告时先进入目标交易工作区，再调用脚本：
 
 ```powershell
-python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --json
+python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 ```
 
 不要假设报告应写入代码项目根目录。`prepare_candidates.py` 中的 `report_path` 以当前工作目录为基准。
@@ -56,7 +56,7 @@ python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --json
 ## 运行期硬规则
 
 - 当日涨停必须由 `limit-hit/scripts/fetch_limit_up.py --json` 现场获取，不能用旧报告冒充当日。
-- 先运行 `prepare_candidates.py --json`，模型不得重复手工计算脚本已经给出的涨停数、晋级数、板数、题材聚合和候选指标。
+- 先运行 `prepare_candidates.py --compact`，模型不得重复手工计算脚本已经给出的涨停数、晋级数、板数、题材聚合和候选指标；需要审计原始字段时改用 `--json`。
 - `data_date` 是行情实际日期，`generated_at` 是执行时间，两者不得混用。
 - `quote_date != data_date` 时，本轮接力反馈不是当日口径；标“数据未获取”，停止给出可打板结论。
 - 报告文件名使用 `data_date`，固定写入 `report/打板候选/<data_date>.md`，同一数据日重跑覆盖更新。
@@ -71,7 +71,7 @@ python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --json
 
 - 取数代码只使用 Python 标准库。
 - 真实数据只经 `limit-hit/scripts/` 获取，不新增外部项目路径依赖。
-- 网络请求统一走 `http_util.py`，保持“直连优先、连续失败后系统代理兜底”的行为。
+- 网络请求统一走 `http_util.py`，强制直连并绕过系统代理。
 - 主数据源和备用源必须保留，不得因主接口暂时可用而删除回退逻辑。
 - 东方财富节点包括 `push2.eastmoney.com`、`push2delay.eastmoney.com` 和 `push2test.eastmoney.com`。
 - `push2test` 的日K路径可能返回空数据，个股日K必须保留腾讯回退。

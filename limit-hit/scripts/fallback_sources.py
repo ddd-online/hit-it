@@ -21,7 +21,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import http_util  # noqa: E402 与脚本同目录的网络层（直连优先、系统代理兜底）
+import http_util  # noqa: E402 与脚本同目录的直连网络层
 
 USER_AGENT = "Mozilla/5.0"
 TENCENT_REFERER = "https://gu.qq.com/"
@@ -55,7 +55,7 @@ F10_INDUSTRY_COLUMNS = "SECURITY_CODE,SECURITY_NAME_ABBR,BOARD_NAME,NEW_BOARD_CO
 TENCENT_QUOTE_CHUNK = 50
 
 
-# 网络层统一走 http_util：直连优先（绕过 Windows 注册表代理），连续失败 3 次后回退系统代理。
+# 网络请求统一走 http_util，强制直连。
 _open = http_util.open_url
 
 

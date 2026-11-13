@@ -23,7 +23,7 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import fallback_sources  # noqa: E402
-import http_util  # noqa: E402
+import http_util  # noqa: E402 与脚本同目录的直连网络层
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")

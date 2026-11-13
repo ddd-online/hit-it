@@ -81,5 +81,39 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(path.parent.name, "打板候选")
 
 
+class CompactPayloadTest(unittest.TestCase):
+    def test_compact_payload_flattens_candidate_metrics(self):
+        payload = {
+            "generated_at": "2026-11-13T16:00:00+08:00",
+            "data_date": "2026-11-13",
+            "quote_date": "20261113",
+            "previous_date": "2026-11-12",
+            "previous_source": "limit-find-report",
+            "themes": [{"theme": "机器人", "current_count": 2}],
+            "candidates": [{
+                "code": "sz002520",
+                "name": "日发精机",
+                "board_count": 1,
+                "pct": 9.991234,
+                "themes": ["机器人"],
+                "metrics": {
+                    "source": "东方财富日K（精确换手率）",
+                    "returns_pct": {"5d": 12.345},
+                    "ma": {"5": 10.1234},
+                    "chips": {"profit_ratio_pct": 88.888},
+                },
+            }],
+            "limitations": ["仅计算"],
+        }
+        compact = MODULE.build_compact_payload(payload)
+        candidate = compact["candidates"][0]
+        self.assertEqual(compact["schema"], "limit-hit.candidates.compact.v1")
+        self.assertEqual(candidate["pct"], 9.99)
+        self.assertEqual(candidate["returns_pct"]["5d"], 12.35)
+        self.assertEqual(candidate["ma"]["5"], 10.123)
+        self.assertEqual(candidate["chips"]["profit_ratio_pct"], 88.89)
+        self.assertNotIn("metrics", candidate)
+
+
 if __name__ == "__main__":
     unittest.main()

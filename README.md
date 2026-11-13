@@ -34,7 +34,7 @@ hit-it/
 - 可访问东方财富、腾讯、新浪和同花顺公开接口。
 - 只使用 Python 标准库，不需要安装第三方包或配置 API 密钥。
 
-运行期脚本会优先直连，连续失败后回退系统代理。网络层和跨源兜底逻辑位于 `limit-hit/scripts/http_util.py` 与 `limit-hit/scripts/fallback_sources.py`。
+运行期脚本强制直连并绕过系统代理。网络层和跨源兜底逻辑位于 `limit-hit/scripts/http_util.py` 与 `limit-hit/scripts/fallback_sources.py`。
 
 ## 快速开始
 
@@ -47,7 +47,7 @@ cd <目标交易工作区>
 python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --json
 ```
 
-默认输出完整 JSON；去掉 `--json` 输出紧凑文本。脚本返回的 `report_path` 是唯一报告路径，通常为：
+日常运行使用 `--compact` 获取模型友好的单行 JSON；需要审计完整原始字段时使用 `--json`，去掉两者输出文本表。脚本返回的 `report_path` 是唯一报告路径，通常为：
 
 ```text
 report/打板候选/<data_date>.md
@@ -60,7 +60,7 @@ report/打板候选/<data_date>.md
 1. 建立当日与昨日样本、计算题材和候选指标：
 
 ```powershell
-python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --json
+python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 ```
 
 2. 对入围题材定位概念板块：
@@ -72,7 +72,7 @@ python D:\github\hit-it\limit-hit\scripts\fetch_sector_boards.py --type concept 
 3. 下钻板块成分股：
 
 ```powershell
-python D:\github\hit-it\limit-hit\scripts\fetch_sector_leaders.py --board BK1145 --top 300 --json
+python D:\github\hit-it\limit-hit\scripts\fetch_sector_leaders.py --board BK1145 --top 300 --compact
 ```
 
 4. 对少量候选补查消息、资金和股东结构：
@@ -100,7 +100,7 @@ python D:\github\hit-it\limit-hit\scripts\fetch_stock_structure.py sh600410 --js
 | `fetch_capital_flow.py` | 个股主力及超大单/大单/中单/小单资金流向 |
 | `fetch_quote.py` | 腾讯个股行情快照与日K |
 | `fallback_sources.py` | 腾讯、新浪、东财 F10 等备用数据源 |
-| `http_util.py` | 直连优先、系统代理兜底的公共网络层 |
+| `http_util.py` | 强制直连的公共网络层 |
 
 ## 数据口径
 

@@ -7,12 +7,13 @@
                                      [--min-turnover PCT] [--max-turnover PCT]
                                      [--min-gain PCT] [--max-gain PCT]
                                      [--min-float-cap YI] [--max-float-cap YI]
-                                     [--include-st] [--source auto|eastmoney|f10] [--json]
+                                     [--include-st] [--source auto|eastmoney|f10]
+                                     [--json|--compact]
 
 输出: 指定板块（BK 代码）的成分股行情榜——按所选排序返回 Top N 成分股，含现价、当日涨跌幅、
 近5日/近10日累计涨跌幅、换手、量比、成交额、振幅、PE、流通/总市值、主力净流入、行业，
 并标注“涨停≈”；带换手/涨幅/市值过滤时自动多翻页补齐候选；表头附板块当日/近5日/近10日涨幅、
-领涨股与涨跌家数；不产生缓存文件。
+领涨股与涨跌家数。--compact 只输出扩散摘要与涨幅前 10 名，不产生缓存文件。
 
 数据源: 东方财富板块行情中心（push2 clist，fs=b:BKxxxx）优先；该接口不可用时自动切换备用源——
 成分股名单取东财 F10「所属板块」（按 BK 代码匹配，代码口径）、个股行情取腾讯快照、
@@ -24,6 +25,7 @@
 import argparse
 import json
 import os
+import statistics
 import sys
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -31,7 +33,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import http_util  # noqa: E402 与脚本同目录的网络层（直连优先、系统代理兜底）
+import http_util  # noqa: E402 与脚本同目录的直连网络层
 
 import fallback_sources as fb  # noqa: E402 与脚本同目录的备用取数模块
 
@@ -91,7 +93,7 @@ ROW_KEYS = ("code", "name", "price", "change_pct", "change5_pct", "change10_pct"
             "limit_up")
 
 
-# 网络层统一走 http_util：直连优先（绕过 Windows 注册表代理），连续失败 3 次后回退系统代理。
+# 网络请求统一走 http_util，强制直连。
 _open = http_util.open_url
 
 
@@ -601,6 +603,75 @@ def render_text(board, rows, sort, top, quote_time, filter_text,
     return "\n".join(lines)
 
 
+def build_compact_payload(board, rows, sort, top, quote_time, source, limitation):
+    """输出板块扩散摘要与涨幅前列，不返回全部成分股明细。"""
+    def number(value, digits=2):
+        value = to_float(value)
+        return None if value is None else round(value, digits)
+
+    changes = [number(row.get("change_pct")) for row in rows
+               if row.get("change_pct") is not None]
+    change5 = [number(row.get("change5_pct")) for row in rows
+               if row.get("change5_pct") is not None]
+    change10 = [number(row.get("change10_pct")) for row in rows
+                if row.get("change10_pct") is not None]
+    flows = [number(row.get("main_yuan"), 0) for row in rows
+             if row.get("main_yuan") is not None]
+    leaders = sorted(
+        rows,
+        key=lambda row: (
+            row.get("change_pct") is None,
+            -(row.get("change_pct") or 0),
+        ),
+    )[:10]
+
+    def stock(row):
+        return {
+            "code": row.get("code"),
+            "name": row.get("name"),
+            "price": number(row.get("price")),
+            "change_pct": number(row.get("change_pct")),
+            "change5_pct": number(row.get("change5_pct")),
+            "change10_pct": number(row.get("change10_pct")),
+            "turnover_pct": number(row.get("turnover_pct")),
+            "main_inflow_yi": number(
+                row["main_yuan"] / 1e8 if row.get("main_yuan") is not None else None),
+            "industry": row.get("industry"),
+            "limit_up_approx": row.get("limit_up"),
+        }
+
+    return {
+        "schema": "limit-hit.sector-diffusion.compact.v1",
+        "board": board,
+        "sort": sort,
+        "sort_name": SORT_NAMES[sort],
+        "requested_top": top,
+        "source": source,
+        "source_name": SOURCE_NAMES[source],
+        "quote_time": quote_time,
+        "limitation": limitation,
+        "summary": {
+            "sample": len(rows),
+            "quoted_change": len(changes),
+            "limit_up_count_approx": sum(bool(row.get("limit_up")) for row in rows),
+            "gain_gt0_count": sum(value > 0 for value in changes),
+            "flat_count": sum(value == 0 for value in changes),
+            "down_count": sum(value < 0 for value in changes),
+            "gain_ge3pct_count": sum(value >= 3 for value in changes),
+            "gain_ge5pct_count": sum(value >= 5 for value in changes),
+            "avg_change_pct": round(sum(changes) / len(changes), 2) if changes else None,
+            "median_change_pct": round(statistics.median(changes), 2) if changes else None,
+            "avg_change5_pct": round(sum(change5) / len(change5), 2) if change5 else None,
+            "avg_change10_pct": round(sum(change10) / len(change10), 2) if change10 else None,
+            "main_inflow_yi_returned_rows": round(sum(flows) / 1e8, 2)
+            if flows and len(flows) == len(rows) else None,
+            "main_inflow_missing": len(rows) - len(flows),
+        },
+        "leaders": [stock(row) for row in leaders],
+        "note": "只含扩散摘要与涨幅前10；完整成分股使用 --json",
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(description="A股 板块成分股榜数据报告（东方财富公开接口）")
     ap.add_argument("--board", required=True,
@@ -623,7 +694,9 @@ def main():
     ap.add_argument("--include-st", action="store_true", help="不剔除名称含 ST 的股票")
     ap.add_argument("--source", choices=sorted(SOURCE_ORDER), default="auto",
                     help="数据源：auto 先东财、不可用切 F10 备用源（默认）；可强制 eastmoney / f10")
-    ap.add_argument("--json", action="store_true", help="输出 JSON")
+    output = ap.add_mutually_exclusive_group()
+    output.add_argument("--json", action="store_true", help="输出完整 JSON")
+    output.add_argument("--compact", action="store_true", help="输出模型友好的扩散摘要")
     args = ap.parse_args()
 
     bk_code = args.board.strip().upper()
@@ -690,6 +763,12 @@ def main():
             "limitation": limitation,
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+
+    if args.compact:
+        payload = build_compact_payload(
+            board, rows, args.sort, args.top, quote_time, source, limitation)
+        print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
         return
 
     if not rows:

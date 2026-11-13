@@ -78,7 +78,7 @@
 
 ### 4.2 未涨停股怎么读
 
-从 `scripts/fetch_sector_leaders.py --board BK... --top 300` 取全量成分股，排除已涨停、炸板、跌停后统计：
+从 `scripts/fetch_sector_leaders.py --board BK... --top 300 --compact` 取成分股扩散摘要；需要逐股核验时使用 `--json`。排除已涨停、炸板、跌停后统计：
 
 - 上涨/下跌家数；
 - 平均涨幅、中位涨幅；

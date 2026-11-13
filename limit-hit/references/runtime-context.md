@@ -3,10 +3,10 @@
 ## 启动命令
 
 ```bash
-python limit-hit/scripts/prepare_candidates.py --json
+python limit-hit/scripts/prepare_candidates.py --compact
 ```
 
-默认输出完整 JSON；去掉 `--json` 输出紧凑文本表。脚本不落盘，不生成买卖结论。
+`--compact` 输出模型友好的单行 JSON，只保留决策字段；需要完整审计时使用 `--json`，去掉两者输出文本表。脚本不落盘，不生成买卖结论。
 
 盘中可以在任意交易时点运行。历史样本中 `09:30–09:35` 首次封板的候选质量最好，建议每 1–2 分钟运行；`10:00–11:00` 运行时优先看刚封板、刚回封或强题材核心，封板已久且无新催化的票降级。输出中的 `generated_at` 是本次快照时间，当前日K、换手和封板字段可能尚未收盘，报告必须按盘中快照解释。
 
@@ -33,7 +33,7 @@ python limit-hit/scripts/prepare_candidates.py --json
 模型拿到脚本 JSON 后只做以下工作：
 
 1. 根据题材宽度、梯队、昨日延续和当前扩散，决定哪些题材值得继续分析；
-2. 只对入围的 1–3 个题材调用 `scripts/fetch_sector_leaders.py`，读取未涨停成分股扩散；
+2. 只对入围的 1–3 个题材调用 `scripts/fetch_sector_leaders.py --compact`，读取未涨停成分股扩散摘要；需要逐股核验时改用 `--json`；
 3. 只对每个题材的前 1–2 只候选搜索最新消息，并调用新闻、资金流报告；
 4. 根据洗盘、筹码、梯队、题材趋势和消息硬门槛，决定“可打板/只观察/排除”；
 5. 一个题材只保留一只，写入固定报告。
@@ -52,5 +52,8 @@ python limit-hit/scripts/prepare_candidates.py --json
 - `candidates`：所有当日 1/2 板候选及原始指标；
 - `minutes_since_first_seal`、`minutes_since_last_seal`、`is_reseal`：判断是否刚封、刚回封或封板已久；
 - `limitations`：口径限制。
+
+`--compact` 顶层保留 `schema`、行情日期、上游来源、市场情绪、题材聚合、扁平化候选和限制；
+候选不再嵌套完整 `metrics`，百分数保留 2 位，完整原始字段仍使用 `--json`。
 
 字段缺失就按缺失处理，脚本不会填 0，也不会用本机时间替代行情时间。

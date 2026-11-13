@@ -334,6 +334,100 @@ def build_payload():
     }
 
 
+def build_compact_payload(payload):
+    """把完整预计算压缩为模型决策所需字段，保留原始 --json 供审计。"""
+    def number(value, digits=2):
+        value = to_float(value)
+        return None if value is None else round(value, digits)
+
+    themes = [
+        {
+            "theme": row.get("theme"),
+            "current_count": row.get("current_count"),
+            "previous_count": row.get("previous_count"),
+            "promoted_count": row.get("promoted_count"),
+            "max_board": row.get("max_board"),
+            "board_counts": row.get("board_counts"),
+            "candidate_codes": row.get("candidate_codes"),
+        }
+        for row in payload.get("themes") or []
+    ]
+    candidates = []
+    for row in payload.get("candidates") or []:
+        metric = row.get("metrics") or {}
+        returns = metric.get("returns_pct") or {}
+        ma = metric.get("ma") or {}
+        chips = metric.get("chips") or {}
+        candidates.append({
+            "code": row.get("code"),
+            "name": row.get("name"),
+            "themes": row.get("themes") or [],
+            "board_count": row.get("board_count"),
+            "zt_stat": row.get("zt_stat"),
+            "price": number(row.get("price")),
+            "pct": number(row.get("pct")),
+            "amount_yi": number(row.get("amount_yi")),
+            "float_cap_yi": number(row.get("float_cap_yi")),
+            "total_cap_yi": number(row.get("total_cap_yi")),
+            "turnover_pct": number(row.get("turnover_pct")),
+            "first_seal": row.get("first_seal"),
+            "last_seal": row.get("last_seal"),
+            "break_count": row.get("break_count"),
+            "seal_fund_yi": number(row.get("seal_fund_yi")),
+            "seal_fund_ratio_pct": number(row.get("seal_fund_ratio_pct")),
+            "minutes_since_first_seal": row.get("minutes_since_first_seal"),
+            "minutes_since_last_seal": row.get("minutes_since_last_seal"),
+            "is_reseal": row.get("is_reseal"),
+            "returns_pct": {
+                "5d": number(returns.get("5d")),
+                "10d": number(returns.get("10d")),
+                "20d": number(returns.get("20d")),
+            },
+            "ma": {
+                "5": number(ma.get("5"), 3),
+                "10": number(ma.get("10"), 3),
+                "20": number(ma.get("20"), 3),
+            },
+            "open_gap_pct": number(metric.get("open_gap_pct")),
+            "low_gap_pct": number(metric.get("low_gap_pct")),
+            "volume_ratio_5d": number(metric.get("volume_ratio_5d")),
+            "one_word": metric.get("one_word"),
+            "chips": {
+                "avg_cost": number(chips.get("avg_cost"), 3),
+                "peak_price": number(chips.get("peak_price"), 3),
+                "cost70_low": number(chips.get("cost70_low"), 3),
+                "cost70_high": number(chips.get("cost70_high"), 3),
+                "cost90_low": number(chips.get("cost90_low"), 3),
+                "cost90_high": number(chips.get("cost90_high"), 3),
+                "concentration70_pct": number(chips.get("concentration70_pct")),
+                "concentration90_pct": number(chips.get("concentration90_pct")),
+                "profit_ratio_pct": number(chips.get("profit_ratio_pct")),
+                "above_avg_pct": number(chips.get("above_avg_pct")),
+            } if chips else None,
+            "metric_source": metric.get("source"),
+            "metric_limitations": metric.get("limitations") or [],
+            "warnings": row.get("warnings") or [],
+        })
+    return {
+        "schema": "limit-hit.candidates.compact.v1",
+        "generated_at": payload.get("generated_at"),
+        "data_date": payload.get("data_date"),
+        "quote_date": payload.get("quote_date"),
+        "previous_date": payload.get("previous_date"),
+        "report_path": payload.get("report_path"),
+        "previous_source": payload.get("previous_source"),
+        "previous_report": payload.get("previous_report"),
+        "previous_context": payload.get("previous_context"),
+        "market": payload.get("market"),
+        "yesterday_open": payload.get("yesterday_open"),
+        "yesterday_highest_board": payload.get("yesterday_highest_board"),
+        "themes": themes,
+        "candidates": candidates,
+        "limitations": payload.get("limitations") or [],
+        "note": "候选指标已扁平化和四舍五入；完整原始字段使用 --json",
+    }
+
+
 def print_text(payload):
     print("=" * 112)
     print("limit-hit 候选上下文 · {} · 行情 {} · 快照 {}".format(
@@ -389,11 +483,19 @@ def print_text(payload):
 
 def main():
     ap = argparse.ArgumentParser(description="limit-hit 候选上下文预计算")
-    ap.add_argument("--json", action="store_true", help="输出完整JSON；默认输出紧凑文本")
+    output = ap.add_mutually_exclusive_group()
+    output.add_argument("--json", action="store_true", help="输出完整 JSON，供审计和调试")
+    output.add_argument("--compact", action="store_true", help="输出模型友好的单行紧凑 JSON")
     args = ap.parse_args()
     payload = build_payload()
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif args.compact:
+        print(json.dumps(
+            build_compact_payload(payload),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ))
     else:
         print_text(payload)
 
