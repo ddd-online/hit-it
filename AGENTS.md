@@ -60,8 +60,9 @@ python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 - `data_date` 是行情实际日期，`generated_at` 是执行时间，两者不得混用。
 - `quote_date != data_date` 时，本轮接力反馈不是当日口径；标“数据未获取”，停止给出可打板结论。
 - 报告文件名使用 `data_date`，固定写入 `report/打板候选/<data_date>.md`，同一数据日重跑覆盖更新。
-- 昨日涨停优先复用日期早于当前数据日的最近一份 `report/涨停板复盘/YYYY-MM-DD.md`。
-- 昨日报告缺失、日期不匹配或关键字段不全时，使用 `fetch_limit_up_history.py --date <prev_date> --json` 回补。
+- 昨日涨停池固定复用 `report/涨停池/<previous_date>.json`；不存在时自行生成，已有文件不得覆盖。
+- 昨日涨停池优先使用 `fetch_limit_up.py --json` 随带的 `prev_zt_rows`，不可用时才使用 `fetch_limit_up_history.py --date <prev_date> --json` 回补。
+- 盘后执行且当日行情已收盘时，若 `report/涨停池/<data_date>.json` 不存在，必须生成供下一交易日复用。
 - 只对入围的 1–3 个题材补查板块扩散；只对每个题材筛出的 1–2 只股票补查消息和资金。
 - `fetch_news.py` 只补充公司新闻和公告，不能替代题材级网页搜索。
 - 最新催化必须记录标题、原始来源、发布时间和链接；二手转述必须回溯原始来源。

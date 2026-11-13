@@ -801,6 +801,7 @@ def main():
             },
             "board_levels": board_rows[:15],
             "zt_rows": zt_rows,
+            "prev_zt_rows": prev_zt_rows,
             "prev_max_board": prev_max_board,
             "one_word": {code: bool(v) for code, v in one_word.items() if v is not None},
             "yesterday_performance": {

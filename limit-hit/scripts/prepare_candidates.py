@@ -4,7 +4,8 @@
 
 脚本只做数据装配、聚合和指标计算，不输出买卖结论：
 - 当日涨停通过技能内取数脚本实拉；
-- 昨日优先复用 limit-find 报告，缺失时按 prev_date 回拉；
+- 昨日优先复用 report/涨停池 报告，缺失时用当日接口的昨日池或历史接口生成；
+- 收盘后若今日涨停池不存在，保存今日报告供次日复用；
 - 批量聚合精确概念和名称情绪组；
 - 批量计算日K趋势、洗盘路径、量比和筹码。
 """
@@ -12,7 +13,6 @@
 import argparse
 import collections
 import json
-import re
 import subprocess
 import sys
 from datetime import datetime
@@ -24,9 +24,6 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
-
-CODE_RE = re.compile(r"\b(?:sh|sz|bj)\d{6}\b", re.IGNORECASE)
-DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 
 def run_json(script, *args):
@@ -42,87 +39,6 @@ def run_json(script, *args):
     return json.loads(completed.stdout)
 
 
-def split_row(line):
-    text = line.strip()
-    if not text.startswith("|"):
-        return None
-    return [cell.strip() for cell in text.strip("|").split("|")]
-
-
-def parse_report(path):
-    text = path.read_text(encoding="utf-8")
-    date_match = DATE_RE.search(text[:300])
-    data_date = date_match.group(1) if date_match else path.stem[:10]
-    lines = text.splitlines()
-    start = next(
-        (idx + 1 for idx, line in enumerate(lines)
-         if line.startswith("## 涨停全名单")),
-        None,
-    )
-    if start is None:
-        raise ValueError("报告缺少涨停全名单")
-    section = []
-    for line in lines[start:]:
-        if line.startswith("## "):
-            break
-        section.append(line)
-    header_index = None
-    header = None
-    for idx, line in enumerate(section):
-        cells = split_row(line)
-        if cells and "代码" in cells and "板数" in cells:
-            header_index, header = idx, cells
-            break
-    if header is None:
-        raise ValueError("涨停全名单表头未识别")
-    rows = []
-    for line in section[header_index + 1:]:
-        cells = split_row(line)
-        if not cells:
-            continue
-        if len(cells) < len(header):
-            cells.extend([""] * (len(header) - len(cells)))
-        item = dict(zip(header, cells))
-        code_match = CODE_RE.search(item.get("代码", ""))
-        if not code_match:
-            continue
-        try:
-            board_count = int(item.get("板数") or 0)
-        except ValueError:
-            board_count = None
-        rows.append({
-            "code": code_match.group(0).lower(),
-            "name": item.get("名称"),
-            "board_count": board_count,
-            "industry": item.get("行业"),
-            "amount_yi": to_float(item.get("成交额(亿)")),
-            "first_seal": item.get("首封时间") or None,
-            "reason_tags": [],
-        })
-    mainline = re.search(r"^- 主线：(.+)$", text, re.MULTILINE)
-    formation = re.search(r"^- 阵型：(.+)$", text, re.MULTILINE)
-    structure = re.search(r"^- 结构说明：(.+)$", text, re.MULTILINE)
-    return {
-        "data_date": data_date,
-        "rows": rows,
-        "mainline": mainline.group(1).strip() if mainline else None,
-        "formation": formation.group(1).strip() if formation else None,
-        "formation_structure": structure.group(1).strip() if structure else None,
-    }
-
-
-def find_previous_report(data_date):
-    report_dir = Path.cwd() / "report" / "涨停板复盘"
-    if not report_dir.exists():
-        return None
-    candidates = []
-    for path in report_dir.glob("*.md"):
-        match = DATE_RE.fullmatch(path.stem)
-        if match and path.stem < data_date:
-            candidates.append((path.stem, path))
-    return max(candidates, default=(None, None), key=lambda item: item[0])[1]
-
-
 def to_float(value):
     try:
         return float(value)
@@ -136,6 +52,137 @@ def compact_date(day):
 
 def build_report_path(data_date):
     return Path.cwd() / "report" / "打板候选" / "{}.md".format(data_date)
+
+
+def build_limit_pool_path(data_date):
+    return Path.cwd() / "report" / "涨停池" / "{}.json".format(data_date)
+
+
+def load_limit_pool(path, data_date):
+    """读取指定日期的涨停池；文件损坏或日期不符时直接报错，避免覆盖用户数据。"""
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("涨停池文件读取失败：{}（{}）".format(path, exc))
+    if payload.get("data_date") != data_date:
+        raise RuntimeError("涨停池日期不匹配：{} 应为 {}".format(path, data_date))
+    if not isinstance(payload.get("stocks"), list):
+        raise RuntimeError("涨停池文件缺少 stocks：{}".format(path))
+    return payload
+
+
+def market_closed(snapshot, data_date, quote_date):
+    """行情日期已结束且当日行情已取到时，才允许保存当日涨停池。"""
+    if quote_date != compact_date(data_date):
+        return False
+    if data_date < snapshot.date().isoformat():
+        return True
+    return data_date == snapshot.date().isoformat() and (snapshot.hour, snapshot.minute) >= (15, 0)
+
+
+def normalize_pool_stock(row):
+    def number(value, digits=2):
+        value = to_float(value)
+        return None if value is None else round(value, digits)
+
+    seal_fund_yi = row.get("seal_fund_yi")
+    if seal_fund_yi is None and row.get("seal_amount_yuan") is not None:
+        seal_fund_yi = to_float(row["seal_amount_yuan"]) / 1e8
+    return {
+        "code": row.get("code"),
+        "name": row.get("name"),
+        "board_count": row.get("board_count"),
+        "industry": row.get("industry"),
+        "price": number(row.get("price")),
+        "pct": number(row.get("pct") if row.get("pct") is not None else row.get("change_pct")),
+        "amount_yi": number(row.get("amount_yi")),
+        "float_cap_yi": number(row.get("float_cap_yi")),
+        "total_cap_yi": number(row.get("total_cap_yi")),
+        "turnover_pct": number(row.get("turnover_pct")),
+        "first_seal": row.get("first_seal"),
+        "last_seal": row.get("last_seal"),
+        "break_count": row.get("break_count", row.get("open_count")),
+        "seal_fund_yi": None if seal_fund_yi is None else round(seal_fund_yi, 2),
+        "zt_stat": row.get("zt_stat"),
+        "one_word": row.get("one_word"),
+        "themes": row.get("themes") or [],
+    }
+
+
+def build_limit_pool_payload(data_date, rows, generated_at, source, source_name,
+                             quote_date, market, limitations):
+    """生成模型可直接复用的涨停池摘要与逐股事实。"""
+    stocks = sorted(
+        (normalize_pool_stock(row) for row in rows),
+        key=lambda row: (
+            -(row.get("board_count") or 0),
+            row.get("first_seal") or "99:99:99",
+            row.get("code") or "",
+        ),
+    )
+    board_counts = collections.Counter()
+    industry_counts = collections.Counter()
+    theme_rows = collections.defaultdict(list)
+    for row in stocks:
+        board_count = row.get("board_count")
+        board_counts[str(board_count) if board_count else "未获取"] += 1
+        industry_counts[row.get("industry") or "未获取"] += 1
+        for theme in row.get("themes") or []:
+            theme_rows[theme].append(row)
+    max_board = max((row.get("board_count") or 0 for row in stocks), default=None)
+    max_stocks = [
+        {"code": row["code"], "name": row["name"]}
+        for row in stocks if max_board and row.get("board_count") == max_board
+    ]
+    themes = [
+        {
+            "theme": theme,
+            "count": len(items),
+            "max_board": max((row.get("board_count") or 0 for row in items), default=0),
+            "codes": [row["code"] for row in items],
+        }
+        for theme, items in theme_rows.items()
+        if len(items) >= 2
+    ]
+    themes.sort(key=lambda item: (-item["count"], -item["max_board"], item["theme"]))
+    return {
+        "schema": "limit-hit.limit-pool.v1",
+        "data_date": data_date,
+        "generated_at": generated_at,
+        "quote_date": quote_date,
+        "closed": True,
+        "source": source,
+        "source_name": source_name,
+        "market": market,
+        "summary": {
+            "count": len(stocks),
+            "max_board": max_board,
+            "max_board_stocks": max_stocks,
+            "board_counts": dict(sorted(board_counts.items())),
+            "industries": [
+                {"industry": industry, "count": count}
+                for industry, count in industry_counts.most_common(10)
+            ],
+            "themes": themes,
+        },
+        "stocks": stocks,
+        "limitations": limitations,
+        "note": "本文件只保存涨停池事实和题材归属，不包含买卖判断；summary.themes 只列至少 2 只股票的题材，单票题材见 stocks。",
+    }
+
+
+def write_limit_pool(path, payload):
+    """只在文件不存在时写入，已有涨停池始终复用。"""
+    if path.exists():
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return True
 
 
 def minutes_since(snapshot, clock):
@@ -175,14 +222,20 @@ def themes_for(code, concepts):
     return list(dict.fromkeys(themes))
 
 
+def row_themes(row, concepts):
+    if "themes" in row:
+        return row.get("themes") or []
+    return themes_for(row.get("code"), concepts)
+
+
 def theme_summary(current_rows, previous_rows, concepts):
     current_by_theme = collections.defaultdict(list)
     previous_by_theme = collections.defaultdict(list)
     for row in current_rows:
-        for theme in themes_for(row["code"], concepts):
+        for theme in row_themes(row, concepts):
             current_by_theme[theme].append(row)
     for row in previous_rows:
-        for theme in themes_for(row["code"], concepts):
+        for theme in row_themes(row, concepts):
             previous_by_theme[theme].append(row)
     previous_codes = {row["code"] for row in previous_rows}
     output = []
@@ -243,39 +296,99 @@ def build_payload():
     previous_date = "{}-{}-{}".format(
         current["prev_date"][:4], current["prev_date"][4:6], current["prev_date"][6:])
 
-    previous_report = find_previous_report(data_date)
-    previous_source = "limit-find-report"
-    previous_rows = []
-    previous_context = {}
-    if previous_report:
-        try:
-            parsed_report = parse_report(previous_report)
-            if parsed_report["data_date"] == previous_date:
-                previous_rows = parsed_report["rows"]
-                previous_context = {
-                    "mainline": parsed_report["mainline"],
-                    "formation": parsed_report["formation"],
-                    "formation_structure": parsed_report["formation_structure"],
-                }
-            else:
-                previous_rows = []
-        except Exception:  # noqa: BLE001 坏报告回退接口
-            previous_rows = []
-    if not previous_rows:
-        previous_source = "limit-hit-history"
-        previous_payload = run_json(
-            "fetch_limit_up_history.py", "--date", compact_date(previous_date), "--json")
-        previous_rows = previous_payload.get("rows") or []
+    current_rows = current.get("zt_rows") or []
+    previous_path = build_limit_pool_path(previous_date)
+    previous_pool = load_limit_pool(previous_path, previous_date)
+    previous_generated = False
+    if previous_pool:
+        previous_rows = previous_pool["stocks"]
+        previous_source = "涨停池报告：{}".format(
+            previous_pool.get("source_name") or previous_pool.get("source") or "未获取")
+    else:
+        previous_rows = current.get("prev_zt_rows") or []
+        previous_source_name = "东方财富 push2ex 昨日涨停池"
+        previous_source = "eastmoney-prev-pool"
+        previous_limitations = [
+            "来自当日接口随带的昨日涨停池",
+            "涨停池不含 ST 与科创板",
+        ]
+        if not previous_rows:
+            previous_source = "10jqka-history"
+            history = run_json(
+                "fetch_limit_up_history.py",
+                "--date", compact_date(previous_date),
+                "--json",
+            )
+            previous_rows = history.get("rows") or []
+            previous_source_name = history.get("source") or "同花顺公开历史涨停池"
+            previous_limitations = history.get("limitations") or []
 
-    all_codes = sorted({
-        row["code"] for row in current.get("zt_rows", []) + previous_rows
-    })
-    concepts = hydrate_concepts(all_codes)
-    themes = theme_summary(current.get("zt_rows", []), previous_rows, concepts)
+    codes_to_hydrate = {
+        row["code"] for row in current_rows
+        if "themes" not in row
+    } | {
+        row["code"] for row in previous_rows
+        if "themes" not in row
+    }
+    concepts = hydrate_concepts(sorted(codes_to_hydrate))
+    for row in current_rows:
+        if "themes" not in row:
+            row["themes"] = themes_for(row["code"], concepts)
+    for row in previous_rows:
+        if "themes" not in row:
+            row["themes"] = themes_for(row["code"], concepts)
+
+    overview = current.get("overview") or {}
+    if not previous_pool:
+        previous_market = {
+            "zt_count": overview.get("prev_zt_count"),
+            "dt_count": overview.get("prev_dt_count"),
+            "zb_count": overview.get("prev_zb_count"),
+            "seal_rate_pct": overview.get("prev_seal_rate_pct"),
+        }
+        previous_pool = build_limit_pool_payload(
+            data_date=previous_date,
+            rows=previous_rows,
+            generated_at=snapshot.isoformat(timespec="seconds"),
+            source=previous_source,
+            source_name=previous_source_name,
+            quote_date=compact_date(previous_date),
+            market=previous_market,
+            limitations=previous_limitations + [
+                "题材来自生成时 F10 精确概念，历史归属可能变动",
+            ],
+        )
+        previous_generated = write_limit_pool(previous_path, previous_pool)
+
+    current_path = build_limit_pool_path(data_date)
+    current_generated = False
+    if market_closed(snapshot, data_date, current.get("quote_date")):
+        if current_path.exists():
+            load_limit_pool(current_path, data_date)
+        else:
+            for row in current_rows:
+                if row["code"] in (current.get("one_word") or {}):
+                    row["one_word"] = current["one_word"][row["code"]]
+            current_pool = build_limit_pool_payload(
+                data_date=data_date,
+                rows=current_rows,
+                generated_at=snapshot.isoformat(timespec="seconds"),
+                source="eastmoney-push2ex",
+                source_name="东方财富 push2ex 涨停池",
+                quote_date=current.get("quote_date"),
+                market=overview,
+                limitations=[
+                    "涨停池不含 ST 与科创板",
+                    "题材来自生成时 F10 精确概念，后续可能变动",
+                ],
+            )
+            current_generated = write_limit_pool(current_path, current_pool)
+
+    themes = theme_summary(current_rows, previous_rows, concepts)
     yesterday_high = find_yesterday_high(previous_rows, current)
 
     candidates = [
-        row for row in current.get("zt_rows", [])
+        row for row in current_rows
         if row.get("board_count") in (1, 2)
     ]
     metric_payload = run_json(
@@ -293,7 +406,6 @@ def build_payload():
         if not amount and row.get("amount_yi") is not None:
             amount = row["amount_yi"] * 1e8
         seal_amount = (row.get("seal_fund_yi") or 0) * 1e8 if row.get("seal_fund_yi") is not None else None
-        row["themes"] = themes_for(row["code"], concepts)
         row["metrics"] = metric
         row["minutes_since_first_seal"] = minutes_since(snapshot, row.get("first_seal"))
         row["minutes_since_last_seal"] = minutes_since(snapshot, row.get("last_seal"))
@@ -319,8 +431,11 @@ def build_payload():
         "previous_date": previous_date,
         "quote_date": current.get("quote_date"),
         "previous_source": previous_source,
-        "previous_report": str(previous_report) if previous_report else None,
-        "previous_context": previous_context,
+        "previous_pool_report": str(previous_path),
+        "previous_pool_generated": previous_generated,
+        "previous_context": previous_pool.get("summary"),
+        "current_pool_report": str(current_path),
+        "current_pool_generated": current_generated,
         "market": current.get("overview"),
         "yesterday_open": (current.get("yesterday_open_close") or {}).get("overall"),
         "yesterday_highest_board": yesterday_high,
@@ -408,6 +523,14 @@ def build_compact_payload(payload):
             "metric_limitations": metric.get("limitations") or [],
             "warnings": row.get("warnings") or [],
         })
+    previous_context = payload.get("previous_context") or {}
+    compact_previous_context = {
+        "count": previous_context.get("count"),
+        "max_board": previous_context.get("max_board"),
+        "max_board_stocks": previous_context.get("max_board_stocks"),
+        "board_counts": previous_context.get("board_counts"),
+        "top_themes": (previous_context.get("themes") or [])[:10],
+    }
     return {
         "schema": "limit-hit.candidates.compact.v1",
         "generated_at": payload.get("generated_at"),
@@ -416,8 +539,11 @@ def build_compact_payload(payload):
         "previous_date": payload.get("previous_date"),
         "report_path": payload.get("report_path"),
         "previous_source": payload.get("previous_source"),
-        "previous_report": payload.get("previous_report"),
-        "previous_context": payload.get("previous_context"),
+        "previous_pool_report": payload.get("previous_pool_report"),
+        "previous_pool_generated": payload.get("previous_pool_generated"),
+        "previous_context": compact_previous_context,
+        "current_pool_report": payload.get("current_pool_report"),
+        "current_pool_generated": payload.get("current_pool_generated"),
         "market": payload.get("market"),
         "yesterday_open": payload.get("yesterday_open"),
         "yesterday_highest_board": payload.get("yesterday_highest_board"),
@@ -435,13 +561,13 @@ def print_text(payload):
         payload.get("generated_at") or "-"))
     print("报告文件：{}".format(payload.get("report_path") or "-"))
     print("=" * 112)
-    print("昨日来源：{} {}".format(
-        payload["previous_source"], payload.get("previous_report") or ""))
-    previous_context = payload.get("previous_context") or {}
-    if previous_context.get("mainline"):
-        print("昨日主线：{}".format(previous_context["mainline"]))
-    if previous_context.get("formation"):
-        print("昨日阵型：{}".format(previous_context["formation"]))
+    print("昨日来源：{}".format(payload["previous_source"]))
+    print("昨日涨停池：{}（新生成：{}）".format(
+        payload.get("previous_pool_report") or "-",
+        "是" if payload.get("previous_pool_generated") else "否"))
+    print("今日涨停池：{}（新生成：{}）".format(
+        payload.get("current_pool_report") or "-",
+        "是" if payload.get("current_pool_generated") else "否"))
     market = payload.get("market") or {}
     print("市场：涨停 {} / 跌停 {} / 炸板 {} / 封板率 {}%".format(
         market.get("zt_count"), market.get("dt_count"), market.get("zb_count"),

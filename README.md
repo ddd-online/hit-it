@@ -38,13 +38,13 @@ hit-it/
 
 ## 快速开始
 
-项目根目录适合开发和测试；实际报告、昨日复盘报告和 `ACCOUNT.md` 从当前工作目录读取。因此生成交易工作区报告时，应先进入目标工作区，再调用本项目的脚本。
+项目根目录适合开发和测试；实际候选报告、涨停池文件和 `ACCOUNT.md` 从当前工作目录读取。因此生成交易工作区报告时，应先进入目标工作区，再调用本项目的脚本。
 
 PowerShell 示例：
 
 ```powershell
 cd <目标交易工作区>
-python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --json
+python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 ```
 
 日常运行使用 `--compact` 获取模型友好的单行 JSON；需要审计完整原始字段时使用 `--json`，去掉两者输出文本表。脚本返回的 `report_path` 是唯一报告路径，通常为：
@@ -52,6 +52,8 @@ python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --json
 ```text
 report/打板候选/<data_date>.md
 ```
+
+涨停池独立保存在 `report/涨停池/<date>.json`。昨日文件存在时直接复用；不存在时由当日接口随带的昨日池生成。盘后确认收盘且当日文件不存在时，也会生成当日文件供下一交易日照常读取。
 
 `data_date` 取行情实际日期，不取执行日期。凌晨、跨日或非交易日运行时，不得用本机日期改写报告文件名。
 
@@ -91,7 +93,7 @@ python D:\github\hit-it\limit-hit\scripts\fetch_stock_structure.py sh600410 --js
 |---|---|
 | `prepare_candidates.py` | 预计算市场情绪、昨日反馈、题材梯队、候选日K、量能和筹码 |
 | `fetch_limit_up.py` | 当日及昨日涨停、跌停、炸板池和昨日涨停今日表现 |
-| `fetch_limit_up_history.py` | 昨日报告不可用时回补历史涨停成功池 |
+| `fetch_limit_up_history.py` | 当日接口没有带回昨日池时回补历史涨停成功池 |
 | `fetch_stock_structure.py` | 概念归属、股东户数、日K与筹码推演 |
 | `fetch_stock_metrics.py` | 批量日K趋势、均线、量比、开盘差和筹码指标 |
 | `fetch_sector_boards.py` | 概念/行业板块行情榜，用于定位 BK 代码 |

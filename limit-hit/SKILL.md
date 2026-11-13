@@ -1,6 +1,6 @@
 ---
 name: limit-hit
-description: 筛选 A 股一进二、二进三打板候选，优先复用 limit-find 昨日报告并结合当日实时涨停、最新消息、板块梯队、题材趋势、洗盘与筹码结构，每题材最多一只并给出次日高开评估条件；不负责下单。
+description: 筛选 A 股一进二、二进三打板候选，复用自维护涨停池并结合当日实时涨停、最新消息、板块梯队、题材趋势、洗盘与筹码结构，每题材最多一只并给出次日高开评估条件；不负责下单。
 ---
 
 # 涨停打板候选（limit-hit）
@@ -22,7 +22,7 @@ description: 筛选 A 股一进二、二进三打板候选，优先复用 limit-
 3. 收盘后或凌晨也允许运行，用于复盘和下一交易日计划；此时必须使用最近交易日作为 `data_date`，运行口径写“收盘复盘/盘后计划”，不能把执行日期当数据日期。
 4. 报告必须标“盘中快照”或“收盘复盘”及执行时间；盘中数据不能被收盘字段替代。
 5. 当日涨停始终由技能内 `scripts/fetch_limit_up.py --json` 现场拉取，不拿旧报告冒充当日。
-6. 昨日涨停优先复用 `report/涨停板复盘/` 下日期早于本次数据日的最近一份 `$limit-find` 报告；报告不存在、日期不匹配或关键字段不全时，用当日数据返回的 `prev_date` 回拉昨日接口数据。
+6. 昨日涨停池固定复用 `report/涨停池/<previous_date>.json`；文件不存在时，用当日数据随带的昨日涨停池自行生成，缺失时再用 `fetch_limit_up_history.py --date <previous_date> --json` 回补。已有文件不得覆盖。
 7. 若存在 `ACCOUNT.md`，只读取“板块权限”用于过滤无法交易的代码；不存在时按主板、非 ST 的保守默认，并在报告注明。
 8. 不读取 `MUST.md`、`NOTES.md`、`POSITION.md` 或个股目录，不维护观察池。
 9. 报告文件必须写入 `report/打板候选/<data_date>.md`：文件名日期取自 `prepare_candidates.py` 的 `data_date`，不是本机执行日期。凌晨执行、跨日执行或非交易日执行时，仍使用行情实际数据日期；同一数据日期重跑覆盖更新。脚本输出的 `report_path` 是唯一目标路径。
@@ -37,13 +37,13 @@ description: 筛选 A 股一进二、二进三打板候选，优先复用 limit-
 python limit-hit/scripts/prepare_candidates.py --compact
 ```
 
-该脚本一次性完成当日实拉、昨日报告复用或回补、概念聚合、梯队统计和候选指标计算。模型读取输出，不重复手工拉取或计算这些字段。具体边界见 [references/runtime-context.md](references/runtime-context.md)。
+该脚本一次性完成当日实拉、昨日涨停池复用或生成、概念聚合、梯队统计和候选指标计算。模型读取输出，不重复手工拉取或计算这些字段。具体边界见 [references/runtime-context.md](references/runtime-context.md)。
 
 数据日期、行情时间必须写进报告。接口回退日期不等于用户请求日期时，直接说明差异；不能把旧数据冒充当日。
 
 若 `quote_date != data_date`，该批接力反馈不是当日口径，应标“数据未获取”并停止给出可打板结论。
 
-报告“上游复用”必须写清：读取了哪份 `limit-find` 报告、复用了哪些字段、哪些由接口补齐；没有可用报告时写“由接口重建”。
+报告“上游复用”必须写清：读取或生成了哪份 `report/涨停池/<date>.json`、使用了其中哪些事实字段，以及昨日涨停池的来源。
 
 ### 2. 模型选择题材，再补扩散
 
@@ -124,7 +124,7 @@ A 股短线默认不把营收、净利、负债率、估值作为主要加减分
 
 按 [references/report-template.md](references/report-template.md) 的固定骨架写入报告。`可打板名单`表头不得改。
 
-报告必须保留「上游复用」「昨日涨停今日集体开盘」「次日 9:25 开盘退出复核」三节，让报告能看出昨日 `limit-find` 报告用了什么、最高板硬规则是否通过、次日竞价按什么分母复核。
+报告必须保留「上游复用」「昨日涨停今日集体开盘」「次日 9:25 开盘退出复核」三节，让报告能看出昨日涨停池文件用了什么、最高板硬规则是否通过、次日竞价按什么分母复核。
 
 所有数字进表格；趋势用箭头，状态用固定标记，不用表情符号。报告结尾必须写“不构成投资建议”。
 
@@ -141,11 +141,10 @@ A 股短线默认不把营收、净利、负债率、估值作为主要加减分
 ## 参考资料
 
 - [references/runtime-context.md](references/runtime-context.md)：运行期预计算命令、输出字段，以及“脚本算数、模型决策”的边界；开始筛选前读。
-- [references/upstream-and-evaluation.md](references/upstream-and-evaluation.md)：昨日 `limit-find` 报告复用、缺失回退、最高板硬规则与次日竞价口径；装配样本前读。
+- [references/upstream-and-evaluation.md](references/upstream-and-evaluation.md)：昨日涨停池文件复用、生成规则、最高板硬规则与次日竞价口径；装配样本前读。
 - [references/selection-rules.md](references/selection-rules.md)：硬过滤、题材强度、个股评分、情绪门槛、消息面与高开判据；筛选前读。
 - [references/report-template.md](references/report-template.md)：固定报告骨架；落盘前读。
 - [references/mobile-summary.md](references/mobile-summary.md)：报告生成后的手机端核心摘要格式；最终回复前读。
-- `$limit-find`：昨日涨停报告的上游来源；优先复用，不作为当日数据来源。
 - `$limit-judge`：参考集体高开、竞价量占比和最高板硬规则；本 SKILL 不调用它。
 
 本技能自带运行期取数脚本，全部位于 `scripts/`，不依赖其他 skill 或 `market-data` 目录。

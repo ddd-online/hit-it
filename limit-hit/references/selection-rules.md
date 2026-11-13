@@ -37,7 +37,7 @@
 
 当日报告要求 `quote_date == data_date`。两者不一致时，`yesterday_performance` 不是当日口径，必须标“数据未获取”并停止给出可打板结论。
 
-昨日涨停样本优先来自涨停复盘的 `limit-find` 报告；没有报告才用 `scripts/fetch_limit_up_history.py --date <prev_date> --json` 回拉。报告只缺个股成交额、首封时间等少数字段时，用技能内接口补齐，不重复拉整份数据。
+昨日涨停样本来自 `report/涨停池/<previous_date>.json`；文件不存在时优先用当日接口随带的昨日池生成，缺失时才用 `scripts/fetch_limit_up_history.py --date <prev_date> --json` 回补。已有文件不得覆盖。
 
 参考 `$limit-judge` 的两条硬规则：
 
@@ -90,7 +90,7 @@
 
 ### 4.3 题材趋势
 
-用昨日 `limit-find` 报告与最近 3–5 个交易日的涨停家数、连板高度、晋级率和炸板率判断阶段：
+用最近 3–5 个交易日的 `report/涨停池/` 文件、涨停家数、连板高度、晋级率和炸板率判断阶段：
 
 | 阶段 | 盘面特征 | 对 1/2 板候选的含义 |
 |---|---|---|

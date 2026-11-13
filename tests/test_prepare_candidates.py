@@ -16,28 +16,73 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
-class ReportParsingTest(unittest.TestCase):
-    def test_parses_previous_limit_find_report(self):
-        text = """# 涨停板复盘 · 2026-11-10
+class LimitPoolReportTest(unittest.TestCase):
+    def test_builds_model_friendly_pool_summary(self):
+        rows = [
+            {
+                "code": "sz002520",
+                "name": "日发精机",
+                "board_count": 1,
+                "industry": "通用设备",
+                "amount_yi": 4.03,
+                "first_seal": "09:32:54",
+                "themes": ["机器人概念"],
+            },
+            {
+                "code": "sh600001",
+                "name": "测试股份",
+                "board_count": 2,
+                "industry": "通用设备",
+                "amount_yi": None,
+                "first_seal": "09:25:00",
+                "themes": ["机器人概念", "央国企改革"],
+            },
+        ]
+        payload = MODULE.build_limit_pool_payload(
+            data_date="2026-11-12",
+            rows=rows,
+            generated_at="2026-11-12T16:00:00+08:00",
+            source="eastmoney-prev-pool",
+            source_name="东方财富 push2ex 昨日涨停池",
+            quote_date="20261112",
+            market={"zt_count": 2},
+            limitations=["测试限制"],
+        )
 
-- 主线：机器人、新能源车
-- 阵型：轮动期
-- 结构说明：崩在哪——无；抬在哪——机器人
+        self.assertEqual(payload["schema"], "limit-hit.limit-pool.v1")
+        self.assertEqual(payload["summary"]["count"], 2)
+        self.assertEqual(payload["summary"]["max_board"], 2)
+        self.assertEqual(payload["summary"]["themes"][0]["theme"], "机器人概念")
+        self.assertEqual(payload["summary"]["themes"][0]["count"], 2)
+        self.assertEqual(payload["market"], {"zt_count": 2})
+        self.assertEqual(payload["stocks"][0]["pct"], None)
 
-## 涨停全名单（供次日竞价评估）
-
-| 代码 | 名称 | 板数 | 行业 | 成交额(亿) | 首封时间 | 备注 |
-|---|---|---|---|---:|---|---|
-| sz002520 | 日发精机 | 1 | 通用设备 | 4.03 | 09:32:54 | - |
-"""
+    def test_existing_pool_is_loaded_and_not_overwritten(self):
         with tempfile.TemporaryDirectory() as temp:
-            path = pathlib.Path(temp) / "2026-11-10.md"
-            path.write_text(text, encoding="utf-8")
-            payload = MODULE.parse_report(path)
-        self.assertEqual(payload["data_date"], "2026-11-10")
-        self.assertEqual(payload["rows"][0]["code"], "sz002520")
-        self.assertEqual(payload["rows"][0]["board_count"], 1)
-        self.assertIn("机器人", payload["mainline"])
+            path = pathlib.Path(temp) / "2026-11-12.json"
+            payload = {
+                "schema": "limit-hit.limit-pool.v1",
+                "data_date": "2026-11-12",
+                "stocks": [],
+            }
+            self.assertTrue(MODULE.write_limit_pool(path, payload))
+            self.assertEqual(
+                MODULE.load_limit_pool(path, "2026-11-12")["data_date"],
+                "2026-11-12",
+            )
+            self.assertFalse(MODULE.write_limit_pool(path, {
+                "data_date": "2026-11-12",
+                "stocks": [{"code": "sh600000"}],
+            }))
+            self.assertEqual(MODULE.load_limit_pool(path, "2026-11-12")["stocks"], [])
+
+    def test_market_closed_requires_final_quote(self):
+        self.assertTrue(MODULE.market_closed(
+            datetime(2026, 11, 13, 15, 0), "2026-11-13", "20261113"))
+        self.assertFalse(MODULE.market_closed(
+            datetime(2026, 11, 13, 14, 59), "2026-11-13", "20261113"))
+        self.assertFalse(MODULE.market_closed(
+            datetime(2026, 11, 13, 16, 0), "2026-11-13", "20261112"))
 
 
 class ThemeAggregationTest(unittest.TestCase):
@@ -54,15 +99,13 @@ class ThemeAggregationTest(unittest.TestCase):
 
     def test_theme_summary_counts_ladder(self):
         current = [
-            {"code": "sh600001", "board_count": 1},
-            {"code": "sh600002", "board_count": 2},
+            {"code": "sh600001", "board_count": 1, "themes": ["机器人"]},
+            {"code": "sh600002", "board_count": 2, "themes": ["机器人"]},
         ]
-        previous = [{"code": "sh600001", "board_count": 1}]
-        concepts = {
-            "sh600001": [{"board_name": "机器人", "is_precise": True, "security_name": "甲"}],
-            "sh600002": [{"board_name": "机器人", "is_precise": True, "security_name": "乙"}],
-        }
-        themes = MODULE.theme_summary(current, previous, concepts)
+        previous = [
+            {"code": "sh600001", "board_count": 1, "themes": ["机器人"]},
+        ]
+        themes = MODULE.theme_summary(current, previous, {})
         self.assertEqual(themes[0]["theme"], "机器人")
         self.assertEqual(themes[0]["current_count"], 2)
         self.assertEqual(themes[0]["promoted_count"], 1)
@@ -75,10 +118,13 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(MODULE.minutes_since(snapshot, "10:03:30"), 11)
         self.assertIsNone(MODULE.minutes_since(snapshot, "10:20:00"))
 
-    def test_report_path_uses_data_date(self):
+    def test_report_paths_use_data_date(self):
         path = MODULE.build_report_path("2026-11-11")
+        pool_path = MODULE.build_limit_pool_path("2026-11-11")
         self.assertEqual(path.name, "2026-11-11.md")
         self.assertEqual(path.parent.name, "打板候选")
+        self.assertEqual(pool_path.name, "2026-11-11.json")
+        self.assertEqual(pool_path.parent.name, "涨停池")
 
 
 class CompactPayloadTest(unittest.TestCase):
@@ -88,7 +134,7 @@ class CompactPayloadTest(unittest.TestCase):
             "data_date": "2026-11-13",
             "quote_date": "20261113",
             "previous_date": "2026-11-12",
-            "previous_source": "limit-find-report",
+            "previous_source": "涨停池报告",
             "themes": [{"theme": "机器人", "current_count": 2}],
             "candidates": [{
                 "code": "sz002520",
