@@ -1,0 +1,4 @@
+interface:
+  display_name: "涨停打板候选（limit-hit）"
+  short_description: "筛选一进二与二进三，重点看消息、梯队、趋势、洗盘与筹码"
+  default_prompt: "使用 $limit-hit 筛选明日可打板的一进二、二进三候选，每题材最多一只"
