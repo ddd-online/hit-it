@@ -1,0 +1,4 @@
+interface:
+  display_name: "低位主升候选（leader-hit）"
+  short_description: "筛选低价主板中建仓完成、洗盘待启动或刚启动的股票"
+  default_prompt: "使用 $leader-hit 查找沪深主板 20 元以下、可能完成建仓或洗盘待启动的股票，并核验题材与消息"

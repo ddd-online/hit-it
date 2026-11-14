@@ -1,10 +1,15 @@
 # 项目代理说明
 
-本目录独立维护 `limit-hit` 打板候选 skill。目标是生成可复核的一进二、二进三候选报告，不执行资金、仓位或账户操作。
+本目录维护两个独立技能：
+
+- `limit-hit`：生成可复核的一进二、二进三打板候选报告；
+- `leader-hit`：筛选低位建仓、洗盘、待启动和刚启动的沪深主板股票。
+
+两个技能都只做候选分析，不执行资金、仓位或账户操作。
 
 ## 开始工作前
 
-1. 先读 `limit-hit/SKILL.md`，确认当前任务属于分析、脚本维护、测试还是报告生成。
+1. 先读对应入口：打板任务读 `limit-hit/SKILL.md`，低位主升任务读 `leader-hit/SKILL.md`。
 2. 涉及具体筛选时，按任务读取对应的 `limit-hit/references/*.md`，不要一次加载全部参考文档。
 3. 修改代码前运行 `python -m unittest discover -s tests -v` 获取基线。
 4. 运行交易报告前确认当前工作目录是目标交易工作区；脚本使用当前目录读取和写入 `report/`，并生成 `report_path`。
@@ -18,12 +23,17 @@ hit-it/
 │   ├── agents/openai.yaml
 │   ├── references/
 │   └── scripts/
+├── leader-hit/
+│   ├── SKILL.md
+│   ├── agents/openai.yaml
+│   ├── references/
+│   └── scripts/
 └── tests/
 ```
 
-- `limit-hit/SKILL.md` 是唯一业务入口。
-- `limit-hit/references/` 存放按需加载的筛选细则、运行边界和报告模板。
-- `limit-hit/scripts/` 是完整运行期取数层，不依赖项目外部的 `market-data`。
+- `limit-hit/SKILL.md` 和 `leader-hit/SKILL.md` 分别是各自唯一业务入口。
+- 两个 `references/` 目录存放按需加载的筛选细则、运行边界和报告模板。
+- `limit-hit/scripts/` 是完整运行期取数层；`leader-hit/scripts/` 自带行情、日 K 与筹码推演所需代码，可单独安装到项目的 `skills/` 目录。
 - `tests/` 覆盖预计算路径、报告解析、题材聚合和脚本自包含性。
 
 ## 核心边界
@@ -54,6 +64,8 @@ python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 不要假设报告应写入代码项目根目录。`prepare_candidates.py` 中的 `report_path` 以当前工作目录为基准。
 
 ## 运行期硬规则
+
+### limit-hit
 
 - 当日涨停必须由 `limit-hit/scripts/fetch_limit_up.py --current-only --json` 现场获取，不能用旧报告冒充当日。
 - 先运行 `prepare_candidates.py --compact`，模型不得重复手工计算脚本已经给出的涨停数、晋级数、板数、题材聚合和候选指标；需要审计原始字段时改用 `--json`。
@@ -109,6 +121,17 @@ python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 - 盘中未收盘时，次日竞价分母标“待收盘确认”。
 - 最终对话必须提供手机可读摘要，包含数据日期、执行时间、市场情绪、可打板或只观察名单、报告路径。
 - 所有报告和最终回复必须写“不构成投资建议”。
+
+### leader-hit
+
+- 只处理沪深主板，默认查找 20 元以下股票；用户价格和个人阈值优先。
+- 低位结构必须先看位置、左侧涨停、筹码、量能和箱体，再补题材与消息。
+- 固定状态只能是“建仓完成 / 洗盘中 / 待启动 / 启动初段 / 只观察 / 排除”。
+- 筹码好不等于可买；没有题材、消息或市场确认时只能“只观察”。
+- 连续一字断层、上方套牢峰压顶、筹码分散、低位放量滞涨、缩量阴跌、纯次新必须硬过滤。
+- 筹码仍按日 K + 换手率推演值标注，`degraded` 只能作辅助。
+- 报告固定写入当前工作区 `report/主升候选/<data_date>.md`。
+- 不承诺上涨幅度，不写提前埋伏；所有报告和最终回复必须写“不构成投资建议”。
 
 ## 修改与验证
 

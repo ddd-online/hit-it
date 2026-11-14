@@ -1,10 +1,13 @@
 # hit-it
 
-面向 A 股短线涨停接力的自包含项目，提供 `limit-hit` Codex skill、运行期取数脚本和单元测试。
+面向 A 股短线结构分析的自包含项目，提供 `limit-hit`、`leader-hit` 两个 Codex skill、运行期取数脚本和单元测试。
 
-项目只筛选一进二、二进三打板候选，不负责资金分配、仓位管理或账户下单。所有报告均不构成投资建议。
+- `limit-hit`：筛选一进二、二进三打板候选；
+- `leader-hit`：筛选低位建仓完成、洗盘中、待启动或刚启动且尚未高位的沪深主板股票。
 
-当前版本：1.1.0 · [查看发布记录](https://github.com/ddd-online/hit-it/releases)
+项目不负责资金分配、仓位管理或账户下单。所有报告均不构成投资建议。
+
+当前版本：1.2.0 · [查看发布记录](https://github.com/ddd-online/hit-it/releases)
 
 ## 能力边界
 
@@ -23,10 +26,15 @@ hit-it/
 │   ├── agents/openai.yaml
 │   ├── references/
 │   └── scripts/
+├── leader-hit/
+│   ├── SKILL.md
+│   ├── agents/openai.yaml
+│   ├── references/
+│   └── scripts/
 └── tests/
 ```
 
-`limit-hit/SKILL.md` 是运行入口。`references/` 提供运行边界、筛选细则、上游报告复用和报告模板。`scripts/` 包含全部取数、指标计算和预计算代码。
+`limit-hit/SKILL.md` 和 `leader-hit/SKILL.md` 分别是两个运行入口。各自的 `references/` 提供筛选细则和报告模板；两个技能均可独立安装，`leader-hit` 自带标准库行情与筹码推演代码。
 
 ## 环境要求
 
@@ -96,6 +104,28 @@ python D:\github\hit-it\limit-hit\scripts\fetch_stock_structure.py sh600410 --js
 
 一条命令可同时定位多个题材，复用同一份板块扫描结果。`prepare_candidates.py` 负责可复现的数据装配和指标计算；题材取舍、消息核验、评分与最终状态由运行 SKILL 的模型完成。
 
+## leader-hit 快速开始
+
+查找沪深主板 20 元以下股票：
+
+```powershell
+python D:\github\hit-it\leader-hit\scripts\prepare_leader_candidates.py --price-max 20 --universe-only --compact
+```
+
+结构初筛（默认从低价主板中选快照预排序前 120 只，再拉历史行情）：
+
+```powershell
+python D:\github\hit-it\leader-hit\scripts\prepare_leader_candidates.py --price-max 20 --compact
+```
+
+判断指定股票：
+
+```powershell
+python D:\github\hit-it\leader-hit\scripts\prepare_leader_candidates.py --codes 600000,000001 --compact
+```
+
+输出固定状态为“建仓完成 / 洗盘中 / 待启动 / 启动初段 / 只观察 / 排除”。技术结构通过后，仍需核验精确概念、板块扩散、新闻和公告。
+
 ## 脚本说明
 
 | 脚本 | 用途 |
@@ -114,6 +144,8 @@ python D:\github\hit-it\limit-hit\scripts\fetch_stock_structure.py sh600410 --js
 | `backtest_limit_hit.py` | 2026 年以来的结构代理回测，默认本金 6000 元 |
 | `fallback_sources.py` | 腾讯、新浪、东财 F10 等备用数据源 |
 | `http_util.py` | 强制直连的公共网络层 |
+| `leader-hit/scripts/prepare_leader_candidates.py` | 沪深主板低价股、日K、筹码、量能、箱体和左侧涨停结构初判 |
+| `leader-hit/scripts/market_data.py` | `leader-hit` 自带的行情、日K与筹码推演层 |
 
 ## 数据口径
 
