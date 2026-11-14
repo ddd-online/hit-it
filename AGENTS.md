@@ -44,9 +44,10 @@ hit-it/
 python -m unittest discover -s tests -v
 ```
 
-生成交易报告时先进入目标交易工作区，再调用脚本：
+每个交易日收盘后先进入目标交易工作区保存涨停池，再运行候选预计算：
 
 ```powershell
+python D:\github\hit-it\limit-hit\scripts\save_limit_pool.py
 python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 ```
 
@@ -54,7 +55,7 @@ python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 
 ## 运行期硬规则
 
-- 当日涨停必须由 `limit-hit/scripts/fetch_limit_up.py --json` 现场获取，不能用旧报告冒充当日。
+- 当日涨停必须由 `limit-hit/scripts/fetch_limit_up.py --current-only --json` 现场获取，不能用旧报告冒充当日。
 - 先运行 `prepare_candidates.py --compact`，模型不得重复手工计算脚本已经给出的涨停数、晋级数、板数、题材聚合和候选指标；需要审计原始字段时改用 `--json`。
 - `--compact` 只列前 30 个题材；完整列表使用 `--json`，不得把截断列表误写成全量。
 - 结构代理回测使用 `backtest_limit_hit.py --start YYYYMMDD --end YYYYMMDD --capital 6000`，报告按 `references/backtest-report-template.md` 输出到 `report/回测/`；必须标注历史消息和分时扩散不可复现。
@@ -62,10 +63,10 @@ python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 - `quote_date != data_date` 时，本轮接力反馈不是当日口径；标“数据未获取”，停止给出可打板结论。
 - 行情取数失败时 `quote_date` 必须为 `null`，不得回填 `data_date`。
 - 报告文件名使用 `data_date`，固定写入 `report/打板候选/<data_date>.md`，同一数据日重跑覆盖更新。
-- 昨日涨停池固定复用 `report/涨停池/<previous_date>.json`；不存在时自行生成，已有文件不得覆盖。
-- 昨日涨停池优先使用 `fetch_limit_up.py --json` 随带的 `prev_zt_rows`，不可用时才使用 `fetch_limit_up_history.py --date <prev_date> --json` 回补。
+- 昨日涨停池固定复用 `report/涨停池/<previous_date>.json`；文件不存在时停止运行并提示先执行保存脚本。
+- 运行时只拉取当日实时涨停池；不得自行拉取、回补、生成或覆盖昨日涨停池。已有文件不得覆盖。
 - 同花顺历史池的“几天几板”是窗口涨停次数，不是当前连板数；只有东财 `lbc`、天数等于板数的等价窗口或连续交易日池回算值可用于一进二、二进三。
-- 盘后执行且当日行情已收盘时，若 `report/涨停池/<data_date>.json` 不存在，必须生成供下一交易日复用。
+- 盘后保存由 `save_limit_pool.py` 单独负责，默认保存最近已完成交易日，并用 `--date YYYYMMDD` 支持指定日期。
 - 只对入围的 1–3 个题材补查板块扩散；只对每个题材筛出的 1–2 只股票补查消息和资金。
 - 多个题材应一次传给 `fetch_sector_boards.py --search ...`，避免逐题材重复扫描板块榜。
 - `fetch_news.py` 只补充公司新闻和公告，不能替代题材级网页搜索。

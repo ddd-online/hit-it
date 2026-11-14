@@ -21,8 +21,8 @@ description: 筛选 A 股一进二、二进三打板候选，复用自维护涨�
 2. 历史样本中首次封板集中在 `09:30–09:35`，这是优先扫描窗口；`10:00–11:00` 仍可运行，但优先看刚封板、刚回封或强题材核心，封板已久且无新催化的票要降级。
 3. 收盘后或凌晨也允许运行，用于复盘和下一交易日计划；此时必须使用最近交易日作为 `data_date`，运行口径写“收盘复盘/盘后计划”，不能把执行日期当数据日期。
 4. 报告必须标“盘中快照”或“收盘复盘”及执行时间；盘中数据不能被收盘字段替代。
-5. 当日涨停始终由技能内 `scripts/fetch_limit_up.py --json` 现场拉取，不拿旧报告冒充当日。
-6. 昨日涨停池固定复用 `report/涨停池/<previous_date>.json`；文件不存在时，用当日数据随带的昨日涨停池自行生成，缺失时再用 `fetch_limit_up_history.py --date <previous_date> --json` 回补。已有文件不得覆盖。历史池的“几天几板”只是窗口涨停次数，当前连板数为空时不得推算一进二或二进三。
+5. 当日涨停始终由技能内 `scripts/fetch_limit_up.py --current-only --json` 现场拉取，不拿旧报告冒充当日。
+6. 昨日涨停池固定复用 `report/涨停池/<previous_date>.json`，运行时不再自行拉取、回补或生成；文件不存在时停止运行，并提示先执行 `save_limit_pool.py --date <previous_date>`。已有文件不得覆盖。历史池的“几天几板”只是窗口涨停次数，当前连板数为空时不得推算一进二或二进三。
 7. 板块权限固定为沪深主板：沪市 `600/601/603/605`，深市 `000/001/002/003`；创业板、科创板和北交所股票不进入候选，并在报告注明。
 8. 报告文件必须写入 `report/打板候选/<data_date>.md`：文件名日期取自 `prepare_candidates.py` 的 `data_date`，不是本机执行日期。凌晨执行、跨日执行或非交易日执行时，仍使用行情实际数据日期；同一数据日期重跑覆盖更新。脚本输出的 `report_path` 是唯一目标路径。
 
@@ -30,19 +30,25 @@ description: 筛选 A 股一进二、二进三打板候选，复用自维护涨�
 
 ### 1. 建立当日与昨日样本
 
-先运行：
+每个交易日收盘后，在当前交易工作区保存当日涨停池：
+
+```bash
+python D:\github\hit-it\limit-hit\scripts\save_limit_pool.py
+```
+
+运行 SKILL 时再拉取当日实时涨停池并读取已保存的昨日涨停池：
 
 ```bash
 python limit-hit/scripts/prepare_candidates.py --compact
 ```
 
-该脚本一次性完成当日实拉、昨日涨停池复用或生成、概念聚合、梯队统计和候选指标计算。模型读取输出，不重复手工拉取或计算这些字段。具体边界见 [references/runtime-context.md](references/runtime-context.md)。
+保存脚本默认取最近已完成交易日，写入当前目录 `report/涨停池/<date>.json`；需要补某日时使用 `--date YYYYMMDD`。`prepare_candidates.py` 一次性完成当日实拉、昨日文件读取、概念聚合、梯队统计和候选指标计算，不自动生成涨停池。模型读取输出，不重复手工拉取或计算这些字段。具体边界见 [references/runtime-context.md](references/runtime-context.md)。
 
 数据日期、行情时间必须写进报告。接口回退日期不等于用户请求日期时，直接说明差异；不能把旧数据冒充当日。
 
 若 `quote_date != data_date`，该批接力反馈不是当日口径，应标“数据未获取”并停止给出可打板结论。
 
-报告“上游复用”必须写清：读取或生成了哪份 `report/涨停池/<date>.json`、使用了其中哪些事实字段，以及昨日涨停池的来源。
+报告“上游复用”必须写清：读取了哪份 `report/涨停池/<date>.json`、使用了其中哪些事实字段，以及昨日涨停池的来源。
 
 ### 2. 模型选择题材，再补扩散
 
@@ -143,7 +149,7 @@ A 股短线默认不把营收、净利、负债率、估值作为主要加减分
 ## 参考资料
 
 - [references/runtime-context.md](references/runtime-context.md)：运行期预计算命令、输出字段，以及“脚本算数、模型决策”的边界；开始筛选前读。
-- [references/upstream-and-evaluation.md](references/upstream-and-evaluation.md)：昨日涨停池文件复用、生成规则、最高板硬规则与次日竞价口径；装配样本前读。
+- [references/upstream-and-evaluation.md](references/upstream-and-evaluation.md)：涨停池收盘保存、昨日文件复用、最高板硬规则与次日竞价口径；装配样本前读。
 - [references/backtest-report-template.md](references/backtest-report-template.md)：结构代理回测的固定报告模板；执行回测时使用。
 - [references/selection-rules.md](references/selection-rules.md)：硬过滤、题材强度、个股评分、情绪门槛、消息面与高开判据；筛选前读。
 - [references/report-template.md](references/report-template.md)：固定报告骨架；落盘前读。

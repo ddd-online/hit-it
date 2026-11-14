@@ -4,7 +4,7 @@
 
 项目只筛选一进二、二进三打板候选，不负责资金分配、仓位管理或账户下单。所有报告均不构成投资建议。
 
-当前版本：1.0.0 · [查看发布记录](https://github.com/ddd-online/hit-it/releases)
+当前版本：1.1.0 · [查看发布记录](https://github.com/ddd-online/hit-it/releases)
 
 ## 能力边界
 
@@ -44,8 +44,11 @@ PowerShell 示例：
 
 ```powershell
 cd <目标交易工作区>
+python D:\github\hit-it\limit-hit\scripts\save_limit_pool.py
 python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 ```
+
+先执行保存脚本应在每个交易日收盘后完成；缺历史文件时可用 `--date YYYYMMDD` 指定日期。候选预计算运行时会拉取当日实时涨停池，但不会自行拉取、回补或生成昨日涨停池。
 
 日常运行使用 `--compact` 获取模型友好的单行 JSON，默认列前 30 个题材；需要审计完整题材和原始字段时使用 `--json`，去掉两者输出文本表。脚本返回的 `report_path` 是唯一报告路径，通常为：
 
@@ -53,31 +56,37 @@ python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 report/打板候选/<data_date>.md
 ```
 
-涨停池独立保存在 `report/涨停池/<date>.json`。昨日文件存在时直接复用；不存在时由当日接口随带的昨日池生成。盘后确认收盘且当日文件不存在时，也会生成当日文件供下一交易日照常读取。
+涨停池由 `save_limit_pool.py` 独立保存在 `report/涨停池/<date>.json`，已有文件不覆盖。SKILL 运行时只读取昨日文件；文件缺失时停止并提示先补存，不再自动使用接口昨日池。
 
 `data_date` 取行情实际日期，不取执行日期。凌晨、跨日或非交易日运行时，不得用本机日期改写报告文件名。
 
 ## 运行流程
 
-1. 建立当日与昨日样本、计算题材和候选指标：
+1. 收盘后保存当日涨停池：
+
+```powershell
+python D:\github\hit-it\limit-hit\scripts\save_limit_pool.py
+```
+
+2. 运行 SKILL 时拉取当日实时涨停池，并读取已保存的昨日池、计算题材和候选指标：
 
 ```powershell
 python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 ```
 
-2. 对入围题材定位概念板块：
+3. 对入围题材定位概念板块：
 
 ```powershell
 python D:\github\hit-it\limit-hit\scripts\fetch_sector_boards.py --type concept --search 机器人 人工智能 --top 20 --json
 ```
 
-3. 下钻板块成分股：
+4. 下钻板块成分股：
 
 ```powershell
 python D:\github\hit-it\limit-hit\scripts\fetch_sector_leaders.py --board BK1145 --top 300 --compact
 ```
 
-4. 对少量候选补查消息、资金和股东结构：
+5. 对少量候选补查消息、资金和股东结构：
 
 ```powershell
 python D:\github\hit-it\limit-hit\scripts\fetch_news.py sh600410 --news 10 --ann 10 --json
@@ -91,9 +100,10 @@ python D:\github\hit-it\limit-hit\scripts\fetch_stock_structure.py sh600410 --js
 
 | 脚本 | 用途 |
 |---|---|
+| `save_limit_pool.py` | 收盘后保存当日涨停池，支持 `--date YYYYMMDD` |
 | `prepare_candidates.py` | 预计算市场情绪、昨日反馈、题材梯队、候选日K、量能和筹码 |
-| `fetch_limit_up.py` | 当日及昨日涨停、跌停、炸板池和昨日涨停今日表现 |
-| `fetch_limit_up_history.py` | 当日接口没有带回昨日池时回补历史涨停成功池 |
+| `fetch_limit_up.py` | 当日及昨日涨停、跌停、炸板池和昨日涨停今日表现；`--current-only` 供 SKILL 使用 |
+| `fetch_limit_up_history.py` | 保存脚本按指定日期回补历史涨停成功池 |
 | `fetch_stock_structure.py` | 概念归属、股东户数、日K与筹码推演 |
 | `fetch_stock_metrics.py` | 批量日K趋势、均线、量比、开盘差和筹码指标 |
 | `fetch_sector_boards.py` | 概念/行业板块行情榜，用于定位 BK 代码 |

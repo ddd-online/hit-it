@@ -303,8 +303,10 @@ def ranked_candidates(current_rows, previous_rows, max_themes,
     return ranked
 
 
-def simulate_trade(candidate, entry_price, exit_price, capital, fees):
-    shares = int(capital // (entry_price * 100)) * 100
+def simulate_trade(candidate, entry_price, exit_price, capital, fees,
+                   position_fraction=1.0):
+    allocated_cash = capital * position_fraction
+    shares = int(allocated_cash // (entry_price * 100)) * 100
     if shares < 100:
         return None
     buy_value = shares * entry_price
@@ -321,6 +323,10 @@ def simulate_trade(candidate, entry_price, exit_price, capital, fees):
         "shares": shares,
         "entry_price": round(entry_price, 3),
         "exit_price": round(exit_price, 3),
+        "position_fraction": position_fraction,
+        "allocated_cash": round(allocated_cash, 2),
+        "position_value": round(buy_value, 2),
+        "cash_after_buy": round(capital - buy_value, 2),
         "gross_gap_pct": round((exit_price / entry_price - 1) * 100, 3),
         "fees": round(total_fees, 2),
         "net_pnl": round(net_pnl, 2),
@@ -445,7 +451,8 @@ def render_report(result, trades, monthly, errors, args):
         "- 历史题材使用同花顺 `reason_tags` 代理，不代表当时东方财富精确概念。",
         "- 历史池的“几天几板”只作窗口统计；当前连板数由预热期内连续交易日池成员关系回算。",
         "- 缺少历史盘中封板与板块成分扩散快照；入场按 D 日涨停收盘价模拟。",
-        "- 每交易日最多一笔、全仓、100 股整手；无法成交的高价股会跳过。",
+        "- 每交易日最多一笔，单笔使用当时总权益的 {:.0%}，100 股整手；无法成交的高价股会跳过。".format(
+            args.position_fraction),
         "- 当前只回测沪深主板；创业板、科创板和北交所不在该结构代理范围内。",
         "- 回测为结构代理，不等同完整 SKILL 实盘流程。",
     ]
@@ -465,7 +472,8 @@ def render_report(result, trades, monthly, errors, args):
         "warmup_days": str(result["warmup_days"]),
         "entry_rule": "信号日涨停收盘价买入",
         "exit_rule": "下一交易日开盘价卖出",
-        "position_rule": "每个交易日最多一笔，最多使用全部可用本金，100 股整手",
+        "position_rule": "每个交易日最多一笔，单笔使用当时总权益的 {:.0%}，100 股整手，其余现金不计收益".format(
+            args.position_fraction),
         "fee_rule": "佣金 {:.4%}（最低 {:.0f} 元）+ 卖出印花税 {:.3%} + 双边过户费 {:.4%}".format(
             args.commission_rate, args.min_commission,
             args.stamp_duty_rate, args.transfer_rate),
@@ -567,7 +575,10 @@ def run_backtest(args):
             if entry_bar["open"] == entry_bar["high"] == entry_bar["low"] == entry_bar["close"]:
                 trade_errors["一字板无法成交"] += 1
                 continue
-            simulated = simulate_trade(item, entry_price, exit_price, capital, fees)
+            simulated = simulate_trade(
+                item, entry_price, exit_price, capital, fees,
+                args.position_fraction,
+            )
             if simulated is None:
                 trade_errors["6000元不足一手"] += 1
                 continue
@@ -617,6 +628,8 @@ def main():
     ap.add_argument("--end", default=datetime.now().astimezone().strftime("%Y%m%d"),
                     help="结束日期 YYYYMMDD")
     ap.add_argument("--capital", type=float, default=6000.0, help="初始本金，默认6000")
+    ap.add_argument("--position-fraction", type=float, default=1.0,
+                    help="单笔使用的总权益比例，0-1，默认1（全仓）")
     ap.add_argument("--workers", type=int, default=4, help="历史涨停池并发数")
     ap.add_argument("--max-themes", type=int, default=3, help="每日最多考虑题材数")
     ap.add_argument("--min-theme-score", type=int, default=50,
@@ -632,16 +645,20 @@ def main():
     args = ap.parse_args()
     if args.capital <= 0:
         ap.error("--capital 必须大于 0")
+    if not 0 < args.position_fraction <= 1:
+        ap.error("--position-fraction 必须在 (0, 1] 区间")
 
     result = run_backtest(args)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
     summary = result["summary"]
+    summary["position_fraction"] = args.position_fraction
     print("回测区间：{} 至 {}".format(args.start, args.end))
     print("交易日：{}，信号日：{}，成交：{}".format(
         summary["trading_days"], summary["signal_days"], summary["trade_count"]))
     print("连板数回算预热：{} 个交易日".format(summary["warmup_days"]))
+    print("单笔权益仓位：{:.0%}".format(args.position_fraction))
     print("方向胜率：{}，净收益胜率：{}，赔率：{}".format(
         rate(summary["direction_win_rate_pct"]),
         rate(summary["net_win_rate_pct"]),

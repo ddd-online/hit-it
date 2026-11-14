@@ -1,5 +1,7 @@
 import importlib.util
 import pathlib
+import json
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from unittest import mock
@@ -351,6 +353,77 @@ class PoolFetchPerformanceTest(unittest.TestCase):
             ],
         )
         self.assertEqual(result["prev_dt"]["kind"], "dt")
+
+    def test_current_only_related_pool_does_not_fetch_previous_day(self):
+        def fake_fetch(kind, date):
+            return {"kind": kind, "date": date}
+
+        with mock.patch.object(
+                LIMIT_UP, "fetch_pool", side_effect=fake_fetch) as fetch:
+            result = LIMIT_UP.fetch_current_related("20261113")
+
+        self.assertCountEqual(
+            fetch.call_args_list,
+            [
+                mock.call("dt", "20261113"),
+                mock.call("zb", "20261113"),
+            ],
+        )
+        self.assertEqual(result["zb"]["date"], "20261113")
+
+
+class SavedPreviousPoolTest(unittest.TestCase):
+    def test_current_only_mode_reads_latest_saved_previous_pool(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = pathlib.Path(temp)
+            for day in ("2026-11-11", "2026-11-12"):
+                (directory / "{}.json".format(day)).write_text(json.dumps({
+                    "data_date": day,
+                    "stocks": [{"code": "sh600001"}],
+                }), encoding="utf-8")
+
+            previous_date, payload = LIMIT_UP.load_saved_previous_pool(
+                datetime(2026, 11, 13), directory)
+
+        self.assertEqual(previous_date.strftime("%Y-%m-%d"), "2026-11-12")
+        self.assertEqual(payload["stocks"][0]["code"], "sh600001")
+
+    def test_current_only_mode_requires_saved_previous_pool(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(RuntimeError, "save_limit_pool.py"):
+                LIMIT_UP.load_saved_previous_pool(
+                    datetime(2026, 11, 13), temp)
+
+    def test_previous_trading_date_comes_from_index_bars(self):
+        raw = json.dumps({
+            "data": {
+                "sh000001": {
+                    "day": [
+                        ["2026-11-11", "1", "1", "1", "1"],
+                        ["2026-11-12", "1", "1", "1", "1"],
+                        ["2026-11-13", "1", "1", "1", "1"],
+                    ],
+                },
+            },
+        }).encode("utf-8")
+        with mock.patch.object(LIMIT_UP, "http_get", return_value=raw):
+            previous = LIMIT_UP.previous_trading_date(
+                datetime(2026, 11, 13, 23, 0))
+
+        self.assertEqual(previous.strftime("%Y-%m-%d"), "2026-11-12")
+
+    def test_current_only_does_not_fall_back_to_older_saved_day(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = pathlib.Path(temp)
+            (directory / "2026-11-11.json").write_text(json.dumps({
+                "data_date": "2026-11-11",
+                "stocks": [],
+            }), encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "2026-11-12"):
+                LIMIT_UP.load_saved_previous_pool(
+                    datetime(2026, 11, 13), directory,
+                    expected_date=datetime(2026, 11, 12))
 
 
 class CompactOutputTest(unittest.TestCase):

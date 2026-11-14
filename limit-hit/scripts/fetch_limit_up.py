@@ -34,6 +34,7 @@ import sys
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -54,6 +55,10 @@ QT_URLS = [
     "http://qt.gtimg.cn/q={codes}",
     "http://sqt.gtimg.cn/q={codes}",
 ]
+INDEX_KLINE_URL = (
+    "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
+    "?param=sh000001,day,,,20,"
+)
 UT = "7eea3edcaed734bea9cbfc24409ed989"
 
 POOL_EP = {
@@ -289,10 +294,15 @@ def resolve_dates(date_arg):
     status 记录请求日期是否被替换、基准日/前一日数据是否真的取到——「取不到」与
     「当天 0 家涨停」必须区分，前者不得渲染成 0 家。
     """
-    if date_arg:
-        base_date = parse_date(date_arg)
-    else:
-        base_date = datetime.now()
+    base_date, base_payload, status = resolve_current_date(date_arg)
+    prev_day, prev_payload = walk_date(base_date - timedelta(days=1))
+    status["prev_available"] = pool_has_rows(prev_payload)
+    return base_date, prev_day, base_payload, prev_payload, status
+
+
+def resolve_current_date(date_arg):
+    """只解析并拉取当前基准日，不请求前一日涨停池。"""
+    base_date = parse_date(date_arg) if date_arg else datetime.now()
     found, base_payload = walk_date(base_date)
     qdate = latest_quote_date()
     status = {"qdate": qdate, "base_available": pool_has_rows(base_payload)}
@@ -306,9 +316,79 @@ def resolve_dates(date_arg):
     if not pool_has_rows(base_payload):
         base_payload = {"pool": [], "tc": 0, "qdate": None}
         status["base_available"] = False
-    prev_day, prev_payload = walk_date(base_date - timedelta(days=1))
-    status["prev_available"] = pool_has_rows(prev_payload)
-    return base_date, prev_day, base_payload, prev_payload, status
+    return base_date, base_payload, status
+
+
+def fetch_current_related(base_date):
+    """并发取当日炸板和跌停池，不请求前一日池。"""
+    jobs = {"dt": "dt", "zb": "zb"}
+    result = {}
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {
+            executor.submit(fetch_pool, kind, base_date): key
+            for key, kind in jobs.items()
+        }
+        for future in as_completed(futures):
+            result[futures[future]] = future.result()
+    return result
+
+
+def previous_trading_date(base_date):
+    """用上证指数日K确定基准日前的真实交易日。"""
+    base_date = base_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    raw = http_get(INDEX_KLINE_URL, "https://finance.qq.com")
+    data = json.loads(raw.decode("utf-8", errors="replace"))
+    node = (data.get("data") or {}).get("sh000001") or {}
+    bars = node.get("day") or node.get("qfqday") or []
+    dates = []
+    for row in bars:
+        try:
+            day = datetime.strptime(str(row[0]), "%Y-%m-%d")
+        except (TypeError, ValueError, IndexError):
+            continue
+        if day < base_date:
+            dates.append(day)
+    if not dates:
+        raise RuntimeError("无法获取基准日前的交易日")
+    return max(dates)
+
+
+def load_saved_previous_pool(base_date, pool_dir, expected_date=None):
+    """读取基准日前一份已保存涨停池，缺失时要求先执行保存脚本。"""
+    directory = Path(pool_dir)
+    if expected_date is not None:
+        path = directory / "{}.json".format(
+            expected_date.strftime("%Y-%m-%d"))
+        if not path.exists():
+            raise RuntimeError(
+                "前一日涨停池文件不存在：{}；请先运行 "
+                "save_limit_pool.py --date {}".format(
+                    path, expected_date.strftime("%Y%m%d")))
+        candidates = [(expected_date, path)]
+    else:
+        candidates = []
+        for path in directory.glob("*.json"):
+            try:
+                file_date = datetime.strptime(path.stem, "%Y-%m-%d")
+            except ValueError:
+                continue
+            if file_date < base_date:
+                candidates.append((file_date, path))
+    if not candidates:
+        raise RuntimeError(
+            "前一日涨停池文件不存在：{}；请先运行 "
+            "save_limit_pool.py --date YYYYMMDD".format(directory))
+    previous_date, path = max(candidates, key=lambda item: item[0])
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("涨停池文件读取失败：{}（{}）".format(path, exc))
+    expected = previous_date.strftime("%Y-%m-%d")
+    if payload.get("data_date") != expected:
+        raise RuntimeError("涨停池日期不匹配：{} 应为 {}".format(path, expected))
+    if not isinstance(payload.get("stocks"), list):
+        raise RuntimeError("涨停池文件缺少 stocks：{}".format(path))
+    return previous_date, payload
 
 
 def resolve_quote_date(quotes):
@@ -523,6 +603,87 @@ def industry_promotion_stats(prev_zt_rows, zt_rows, zb_rows):
                                   if opened else None)
     return sorted(groups.values(),
                   key=lambda x: (-x["today_zt_count"], -x["prev_zt_count"], x["industry"]))
+
+
+def build_json_payload(base_str, prev_str, quote_date, status, notes,
+                       zt_rows, zb_rows, dt_rows, prev_zt_rows,
+                       prev_zb_rows, prev_dt_rows, prev_max_board,
+                       quotes, one_word, previous_market=None):
+    """构造 JSON 输出；当前日模式和完整模式复用同一字段口径。"""
+    board_rows = [r for r in zt_rows if (r["board_count"] or 1) >= 2]
+    board_rows.sort(
+        key=lambda r: (-(r["board_count"] or 0), r["first_seal"] or ""))
+    prev_codes = set(r["code"] for r in prev_zt_rows)
+    today_codes = set(r["code"] for r in zt_rows)
+    dt_codes = set(r["code"] for r in dt_rows)
+    today_rows = prev_zt_today_rows(prev_zt_rows, quotes, today_codes, dt_codes)
+    board_stats = board_structure(zt_rows)
+    saved_market = previous_market or {}
+    prev_zt_n = len(prev_zt_rows)
+    prev_dt_n = (
+        len(prev_dt_rows)
+        if prev_dt_rows or saved_market.get("dt_count") is None
+        else saved_market["dt_count"]
+    )
+    prev_zb_n = (
+        len(prev_zb_rows)
+        if prev_zb_rows or saved_market.get("zb_count") is None
+        else saved_market["zb_count"]
+    )
+    prev_seal_rate = (
+        round(prev_zt_n * 100.0 / (prev_zt_n + prev_zb_n), 1)
+        if prev_zt_n + prev_zb_n else None
+    )
+    if saved_market.get("seal_rate_pct") is not None and not prev_zb_rows:
+        prev_seal_rate = saved_market["seal_rate_pct"]
+    return {
+        "base_date": base_str,
+        "prev_date": prev_str,
+        "quote_date": quote_date,
+        "data_available": status["base_available"],
+        "data_notes": notes,
+        "prev_data_available": status["prev_available"],
+        "overview": {
+            "zt_count": len(zt_rows),
+            "dt_count": len(dt_rows),
+            "zb_count": len(zb_rows),
+            "prev_zt_count": prev_zt_n,
+            "prev_dt_count": prev_dt_n,
+            "prev_zb_count": prev_zb_n,
+            "seal_rate_pct": round(
+                len(zt_rows) * 100.0 / (len(zt_rows) + len(zb_rows)), 1
+            ) if zt_rows or zb_rows else None,
+            "prev_seal_rate_pct": prev_seal_rate,
+            "max_board": board_stats["max_board"],
+            "two_plus_count": board_stats["two_plus_count"],
+            "board_counts": board_stats["board_counts"],
+        },
+        "board_levels": board_rows[:15],
+        "zt_rows": zt_rows,
+        "prev_zt_rows": prev_zt_rows,
+        "prev_max_board": prev_max_board,
+        "one_word": {
+            code: bool(value)
+            for code, value in one_word.items() if value is not None
+        },
+        "yesterday_performance": {
+            "prev_zt_count": len(prev_zt_rows),
+            "promote_count": len(prev_codes & today_codes),
+            "rows": today_rows,
+        },
+        "yesterday_open_close": {
+            "overall": open_close_summary(today_rows),
+            "by_industry": open_close_by_industry(today_rows, min_sample=1),
+        },
+        "industry_promotion": industry_promotion_stats(
+            prev_zt_rows, zt_rows, zb_rows),
+        "industry_dist": industry_distribution(zt_rows),
+        "zb_rows": zb_rows[:10],
+        "zb_all_rows": zb_rows,
+        "dt_rows": dt_rows,
+        "dt_industry_dist": industry_distribution(dt_rows),
+        "note": "数据来源：东方财富 push2ex + 腾讯行情；涨停池不含 ST 与科创板",
+    }
 
 
 def render_text(base, prev, zt_rows, zb_rows, dt_rows, prev_zt_rows,
@@ -777,7 +938,70 @@ def main():
     ap.add_argument("--date", type=str, default="",
                     help="数据日期 YYYYMMDD（默认自动取最近有数据的交易日）")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
+    ap.add_argument("--current-only", action="store_true",
+                    help="只拉当日池，前一日池读取已保存文件（仅限 --json）")
+    ap.add_argument("--previous-pool-dir", default="",
+                    help="前一日涨停池目录，默认当前目录 report/涨停池")
     args = ap.parse_args()
+
+    if args.current_only:
+        if not args.json:
+            ap.error("--current-only 必须与 --json 一起使用")
+        base, base_payload, status = resolve_current_date(args.date)
+        base_str = base.strftime("%Y%m%d")
+        pool_dir = args.previous_pool_dir or str(
+            Path.cwd() / "report" / "涨停池")
+        expected_previous = previous_trading_date(base)
+        prev, previous_pool = load_saved_previous_pool(
+            base, pool_dir, expected_previous)
+        prev_str = prev.strftime("%Y%m%d")
+        status["prev_available"] = True
+        notes = []
+        if args.date and args.date.strip() != base_str:
+            notes.append("请求日期 {} 未取到涨停池数据，已改用最近有数据的交易日 {}。".format(
+                args.date.strip(), base_str))
+        if not status["base_available"]:
+            notes.append("{} 未取到当日涨停池数据。".format(base_str))
+
+        related = fetch_current_related(base_str)
+        zt_rows = [
+            r for r in (normalize_pool_row(x) for x in base_payload["pool"]) if r
+        ]
+        zb_rows = [
+            r for r in (normalize_pool_row(x) for x in related["zb"]["pool"]) if r
+        ]
+        dt_rows = [
+            r for r in (normalize_pool_row(x) for x in related["dt"]["pool"]) if r
+        ]
+        prev_zt_rows = previous_pool["stocks"]
+        prev_max_board = max(
+            (r["board_count"] for r in prev_zt_rows
+             if r.get("board_count") is not None),
+            default=None,
+        )
+        board_rows = [
+            r for r in zt_rows if (r["board_count"] or 1) >= 2
+        ]
+        board_rows.sort(
+            key=lambda r: (-(r["board_count"] or 0), r["first_seal"] or ""))
+        quote_codes = sorted(set(
+            [r["code"] for r in board_rows[:15]]
+            + [r["code"] for r in prev_zt_rows]
+        ))
+        quotes = fetch_quotes(quote_codes)
+        quote_date = resolve_quote_date(quotes)
+        one_word = one_word_check(board_rows, quotes)
+        payload = build_json_payload(
+            base_str, prev_str, quote_date, status, notes,
+            zt_rows, zb_rows, dt_rows, prev_zt_rows,
+            [], [], prev_max_board, quotes, one_word,
+            previous_market=previous_pool.get("market") or {},
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        if not status["base_available"]:
+            http_util.mark_json_emitted()
+            sys.exit("错误：{} 未取到涨停池数据".format(base_str))
+        return
 
     base, prev, base_payload, prev_payload, status = resolve_dates(args.date)
     base_str = base.strftime("%Y%m%d")
@@ -806,12 +1030,6 @@ def main():
     prev_zb_rows = [r for r in (normalize_pool_row(x) for x in prev_zb["pool"]) if r]
     prev_dt_rows = [r for r in (normalize_pool_row(x) for x in prev_dt["pool"]) if r]
 
-    zt_n = len(zt_rows)
-    zb_n = len(zb_rows)
-    dt_n = len(dt_rows)
-    prev_zt_n = len(prev_zt_rows)
-    prev_zb_n = len(prev_zb_rows)
-    prev_dt_n = len(prev_dt_rows)
     prev_max_board = max(
         (r["board_count"] for r in prev_zt_rows
          if r.get("board_count") is not None),
@@ -838,55 +1056,12 @@ def main():
         notes.append("本次判定无效：基准日无任何涨停/跌停/炸板数据。")
 
     if args.json:
-        prev_codes = set(r["code"] for r in prev_zt_rows)
-        today_codes = set(r["code"] for r in zt_rows)
-        dt_codes = set(r["code"] for r in dt_rows)
-        today_rows = prev_zt_today_rows(prev_zt_rows, quotes, today_codes, dt_codes)
-        board_stats = board_structure(zt_rows)
-        payload = {
-            "base_date": base_str,
-            "prev_date": prev_str,
-            "quote_date": quote_date,
-            "data_available": status["base_available"],
-            "data_notes": notes,
-            "prev_data_available": status["prev_available"],
-            "overview": {
-                "zt_count": zt_n,
-                "dt_count": dt_n,
-                "zb_count": zb_n,
-                "prev_zt_count": prev_zt_n,
-                "prev_dt_count": prev_dt_n,
-                "prev_zb_count": prev_zb_n,
-                "seal_rate_pct": round(zt_n * 100.0 / (zt_n + zb_n), 1)
-                if zt_n + zb_n else None,
-                "prev_seal_rate_pct": round(prev_zt_n * 100.0 / (prev_zt_n + prev_zb_n), 1)
-                if prev_zt_n + prev_zb_n else None,
-                "max_board": board_stats["max_board"],
-                "two_plus_count": board_stats["two_plus_count"],
-                "board_counts": board_stats["board_counts"],
-            },
-            "board_levels": board_rows[:15],
-            "zt_rows": zt_rows,
-            "prev_zt_rows": prev_zt_rows,
-            "prev_max_board": prev_max_board,
-            "one_word": {code: bool(v) for code, v in one_word.items() if v is not None},
-            "yesterday_performance": {
-                "prev_zt_count": len(prev_zt_rows),
-                "promote_count": len(prev_codes & today_codes),
-                "rows": today_rows,
-            },
-            "yesterday_open_close": {
-                "overall": open_close_summary(today_rows),
-                "by_industry": open_close_by_industry(today_rows, min_sample=1),
-            },
-            "industry_promotion": industry_promotion_stats(prev_zt_rows, zt_rows, zb_rows),
-            "industry_dist": industry_distribution(zt_rows),
-            "zb_rows": zb_rows[:10],
-            "zb_all_rows": zb_rows,
-            "dt_rows": dt_rows,
-            "dt_industry_dist": industry_distribution(dt_rows),
-            "note": "数据来源：东方财富 push2ex + 腾讯行情；涨停池不含 ST 与科创板",
-        }
+        payload = build_json_payload(
+            base_str, prev_str, quote_date, status, notes,
+            zt_rows, zb_rows, dt_rows, prev_zt_rows,
+            prev_zb_rows, prev_dt_rows, prev_max_board,
+            quotes, one_word,
+        )
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         if not status["base_available"]:
             http_util.mark_json_emitted()

@@ -35,6 +35,22 @@ class TradeSimulationTest(unittest.TestCase):
             round(6600 - 6000 - expected_fees, 2),
         )
 
+    def test_fractional_position_uses_only_requested_capital(self):
+        fees = {
+            "commission_rate": 0.00025,
+            "min_commission": 5.0,
+            "stamp_duty_rate": 0.0005,
+            "transfer_rate": 0.00001,
+        }
+        trade = MODULE.simulate_trade(
+            {"theme": "测试"}, entry_price=10.0, exit_price=11.0,
+            capital=100000.0, fees=fees, position_fraction=0.4)
+
+        self.assertEqual(trade["shares"], 4000)
+        self.assertEqual(trade["position_value"], 40000.0)
+        self.assertEqual(trade["cash_after_buy"], 60000.0)
+        self.assertAlmostEqual(trade["capital_after"], 103956.16)
+
 
 class MetricsTest(unittest.TestCase):
     def test_summarizes_win_rate_odds_and_drawdown(self):

@@ -4,8 +4,8 @@
 
 脚本只做数据装配、聚合和指标计算，不输出买卖结论：
 - 当日涨停通过技能内取数脚本实拉；
-- 昨日优先复用 report/涨停池 报告，缺失时用当日接口的昨日池或历史接口生成；
-- 收盘后若今日涨停池不存在，保存今日报告供次日复用；
+- 昨日涨停池必须由 save_limit_pool.py 预先保存到 report/涨停池，缺失即停止；
+- 运行时只拉当日实时涨停池，不自动生成或覆盖涨停池文件；
 - 批量聚合精确概念和名称情绪组；
 - 批量计算日K趋势、洗盘路径、量比和筹码。
 """
@@ -88,6 +88,17 @@ def load_limit_pool(path, data_date):
         raise RuntimeError("涨停池日期不匹配：{} 应为 {}".format(path, data_date))
     if not isinstance(payload.get("stocks"), list):
         raise RuntimeError("涨停池文件缺少 stocks：{}".format(path))
+    return payload
+
+
+def require_limit_pool(path, data_date):
+    """运行时只接受预先保存的昨日涨停池，缺失时明确要求先执行保存脚本。"""
+    payload = load_limit_pool(path, data_date)
+    if payload is None:
+        raise RuntimeError(
+            "昨日涨停池文件不存在：{}；请先运行 "
+            "save_limit_pool.py --date {}".format(
+                path, compact_date(data_date)))
     return payload
 
 
@@ -366,7 +377,7 @@ def mode_feedback(previous_rows, current_data):
 
 def build_payload():
     snapshot = datetime.now(CN_TZ)
-    current = run_json("fetch_limit_up.py", "--json")
+    current = run_json("fetch_limit_up.py", "--current-only", "--json")
     data_date = "{}-{}-{}".format(
         current["base_date"][:4], current["base_date"][4:6], current["base_date"][6:])
     previous_date = "{}-{}-{}".format(
@@ -374,34 +385,11 @@ def build_payload():
 
     current_rows = current.get("zt_rows") or []
     previous_path = build_limit_pool_path(previous_date)
-    previous_pool = load_limit_pool(previous_path, previous_date)
+    previous_pool = require_limit_pool(previous_path, previous_date)
     previous_generated = False
-    if previous_pool:
-        previous_rows = previous_pool["stocks"]
-        previous_source = "涨停池报告：{}".format(
-            previous_pool.get("source_name") or previous_pool.get("source") or "未获取")
-    else:
-        previous_rows = current.get("prev_zt_rows") or []
-        previous_source_name = "东方财富 push2ex 昨日涨停池"
-        previous_source = "eastmoney-prev-pool"
-        previous_limitations = [
-            "来自当日接口随带的昨日涨停池",
-            "涨停池不含 ST 与科创板",
-        ]
-        if not previous_rows:
-            previous_source = "10jqka-history"
-            history = run_json(
-                "fetch_limit_up_history.py",
-                "--date", compact_date(previous_date),
-                "--json",
-            )
-            previous_rows = history.get("rows") or []
-            previous_source_name = history.get("source") or "同花顺公开历史涨停池"
-            previous_limitations = history.get("limitations") or []
-            previous_limitations.append(
-                "同花顺历史池只提供窗口涨停次数，部分当前连板数未获取；"
-                "未确认板数的样本不得进入一进二、二进三和最高板结论"
-            )
+    previous_rows = previous_pool["stocks"]
+    previous_source = "涨停池报告：{}".format(
+        previous_pool.get("source_name") or previous_pool.get("source") or "未获取")
 
     codes_to_hydrate = {
         row["code"] for row in current_rows
@@ -417,52 +405,6 @@ def build_payload():
     for row in previous_rows:
         if "themes" not in row:
             row["themes"] = themes_for(row["code"], concepts)
-
-    overview = current.get("overview") or {}
-    if not previous_pool:
-        previous_market = {
-            "zt_count": overview.get("prev_zt_count"),
-            "dt_count": overview.get("prev_dt_count"),
-            "zb_count": overview.get("prev_zb_count"),
-            "seal_rate_pct": overview.get("prev_seal_rate_pct"),
-        }
-        previous_pool = build_limit_pool_payload(
-            data_date=previous_date,
-            rows=previous_rows,
-            generated_at=snapshot.isoformat(timespec="seconds"),
-            source=previous_source,
-            source_name=previous_source_name,
-            quote_date=compact_date(previous_date),
-            market=previous_market,
-            limitations=previous_limitations + [
-                "题材来自生成时 F10 精确概念，历史归属可能变动",
-            ],
-        )
-        previous_generated = write_limit_pool(previous_path, previous_pool)
-
-    current_path = build_limit_pool_path(data_date)
-    current_generated = False
-    if market_closed(snapshot, data_date, current.get("quote_date")):
-        if current_path.exists():
-            load_limit_pool(current_path, data_date)
-        else:
-            for row in current_rows:
-                if row["code"] in (current.get("one_word") or {}):
-                    row["one_word"] = current["one_word"][row["code"]]
-            current_pool = build_limit_pool_payload(
-                data_date=data_date,
-                rows=current_rows,
-                generated_at=snapshot.isoformat(timespec="seconds"),
-                source="eastmoney-push2ex",
-                source_name="东方财富 push2ex 涨停池",
-                quote_date=current.get("quote_date"),
-                market=overview,
-                limitations=[
-                    "涨停池不含 ST 与科创板",
-                    "题材来自生成时 F10 精确概念，后续可能变动",
-                ],
-            )
-            current_generated = write_limit_pool(current_path, current_pool)
 
     themes = theme_summary(current_rows, previous_rows, concepts)
     yesterday_high = find_yesterday_high(previous_rows, current)
@@ -514,6 +456,7 @@ def build_payload():
     )
     limitations = [
         "本脚本只计算，不做题材取舍或可打板判断",
+        "运行时只读取预先保存的昨日涨停池，不自动拉取、生成或覆盖涨停池文件",
         "题材来自当前 F10 精确概念，历史归属可能有变动",
         "筹码为日K+换手率推演值",
     ]
@@ -535,8 +478,8 @@ def build_payload():
         "previous_pool_report": str(previous_path),
         "previous_pool_generated": previous_generated,
         "previous_context": previous_pool.get("summary"),
-        "current_pool_report": str(current_path),
-        "current_pool_generated": current_generated,
+        "current_pool_report": None,
+        "current_pool_generated": False,
         "market": current.get("overview"),
         "yesterday_open": (current.get("yesterday_open_close") or {}).get("overall"),
         "yesterday_highest_board": yesterday_high,
@@ -755,4 +698,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:  # noqa: BLE001
-        sys.exit("错误：{}".format(exc))
+        message = str(exc)
+        sys.exit(message if message.startswith("错误：") else "错误：{}".format(message))

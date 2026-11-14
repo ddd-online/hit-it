@@ -1,8 +1,11 @@
 import importlib.util
+import json
+import os
 import pathlib
 import tempfile
 import unittest
 from datetime import datetime
+from unittest import mock
 
 
 MODULE_PATH = (
@@ -76,6 +79,12 @@ class LimitPoolReportTest(unittest.TestCase):
             }))
             self.assertEqual(MODULE.load_limit_pool(path, "2026-11-12")["stocks"], [])
 
+    def test_previous_pool_is_required(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = pathlib.Path(temp) / "2026-11-12.json"
+            with self.assertRaisesRegex(RuntimeError, "save_limit_pool.py"):
+                MODULE.require_limit_pool(path, "2026-11-12")
+
     def test_market_closed_requires_final_quote(self):
         self.assertTrue(MODULE.market_closed(
             datetime(2026, 11, 13, 15, 0), "2026-11-13", "20261113"))
@@ -83,6 +92,37 @@ class LimitPoolReportTest(unittest.TestCase):
             datetime(2026, 11, 13, 14, 59), "2026-11-13", "20261113"))
         self.assertFalse(MODULE.market_closed(
             datetime(2026, 11, 13, 16, 0), "2026-11-13", "20261112"))
+
+    def test_runtime_fetches_current_pool_only(self):
+        current = {
+            "base_date": "20261113",
+            "prev_date": "20261112",
+            "quote_date": "20261113",
+            "zt_rows": [],
+            "overview": {},
+        }
+        old_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as temp:
+            os.chdir(temp)
+            try:
+                path = MODULE.build_limit_pool_path("2026-11-12")
+                path.parent.mkdir(parents=True)
+                path.write_text(json.dumps({
+                    "data_date": "2026-11-12",
+                    "stocks": [],
+                }), encoding="utf-8")
+                with mock.patch.object(
+                        MODULE, "run_json", return_value=current) as run:
+                    payload = MODULE.build_payload()
+                self.assertEqual(
+                    run.call_args_list[0],
+                    mock.call("fetch_limit_up.py", "--current-only", "--json"),
+                )
+                self.assertEqual(payload["data_date"], "2026-11-13")
+                self.assertFalse(
+                    MODULE.build_limit_pool_path("2026-11-13").exists())
+            finally:
+                os.chdir(old_cwd)
 
 
 class ThemeAggregationTest(unittest.TestCase):
