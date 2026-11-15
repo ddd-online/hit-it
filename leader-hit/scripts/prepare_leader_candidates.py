@@ -193,6 +193,23 @@ def code_to_quote(code):
     }
 
 
+def historical_quote(code, name, bar):
+    """用目标日收盘 bar 生成历史行情，禁止把当日实时价带入回放。"""
+    return {
+        "code": code,
+        "name": name,
+        "price": bar.get("close"),
+        "change_pct": None,
+        "amount_yuan": bar.get("amount_yuan"),
+        "turnover_pct": bar.get("turnover_pct"),
+        "volume_ratio": None,
+        "high": bar.get("high"),
+        "float_cap_yi": None,
+        "total_cap_yi": None,
+        "quote_date": bar.get("date"),
+    }
+
+
 def quote_prefilter_score(quote):
     """在拉历史行情前，用快照做低成本排序：温和波动、有量但不极热的优先。"""
     score = 0
@@ -271,6 +288,16 @@ def build_features(quote, bars, cutoff=None):
     lows = [bar["low"] for bar in bars]
     volumes = [bar_volume(bar) for bar in bars]
     current = quote.get("price") or closes[-1]
+    day_return = pct_change(current, closes[-2] if len(closes) >= 2 else None)
+    day_range = (
+        bars[-1].get("high") - bars[-1].get("low")
+        if bars[-1].get("high") is not None
+        and bars[-1].get("low") is not None else None
+    )
+    close_location = (
+        (bars[-1].get("close") - bars[-1].get("low")) / day_range
+        if day_range and bars[-1].get("close") is not None else None
+    )
     low120 = min(lows)
     high120 = max(highs)
     range_position = (
@@ -315,6 +342,10 @@ def build_features(quote, bars, cutoff=None):
         index for index in limit_indices
         if 5 <= len(bars) - 1 - index <= 60
     ]
+    left_limit_indices_1_60 = [
+        index for index in limit_indices
+        if 1 <= len(bars) - 1 - index <= 60
+    ]
 
     chips = market_data.compute_chip_distribution(bars, current)
     overhead_pct = (
@@ -336,8 +367,21 @@ def build_features(quote, bars, cutoff=None):
             "post_avg_volume": statistics.mean(post_volumes) if post_volumes else None,
         }
 
+    breakout_level = box_high
+    breakout_source = "30日箱体上沿"
+    if trigger and trigger.get("high") is not None:
+        trigger_high = trigger["high"]
+        if trigger_high < breakout_level:
+            breakout_level = trigger_high
+            breakout_source = "最近涨停压力位"
+    breakout_margin = pct_change(current, breakout_level)
+
     return {
         "current_price": round(current, 3),
+        "day_return_pct": round(day_return, 2)
+        if day_return is not None else None,
+        "close_location_pct": round(close_location * 100.0, 2)
+        if close_location is not None else None,
         "range_position_pct": round(range_position, 2) if range_position is not None else None,
         "return5_pct": pct_change(current, closes[-6] if len(closes) >= 6 else None),
         "return20_pct": pct_change(current, closes[-21] if len(closes) >= 21 else None),
@@ -353,6 +397,10 @@ def build_features(quote, bars, cutoff=None):
             "low": round(box_low, 3),
             "range_pct": box_range,
             "distance_to_high_pct": pct_change(box_high, current),
+            "breakout_level": round(breakout_level, 3),
+            "breakout_source": breakout_source,
+            "breakout_margin_pct": round(breakout_margin, 2)
+            if breakout_margin is not None else None,
         },
         "support20": round(support20, 3),
         "volume": {
@@ -362,6 +410,7 @@ def build_features(quote, bars, cutoff=None):
             if day_volume_ratio is not None else None,
         },
         "prior_limit_count_5_60": len(left_limit_indices),
+        "limit_count_1_60": len(left_limit_indices_1_60),
         "latest_limit_trigger": trigger,
         "one_word_chain_recent": has_limit_up_chain(bars, len(bars) - 65, len(bars)),
         "chips": chips,
@@ -382,6 +431,8 @@ def judging_helpers(features):
     range_position = features.get("range_position_pct")
     return20 = features.get("return20_pct")
     return60 = features.get("return60_pct")
+    day_return = features.get("day_return_pct")
+    close_location = features.get("close_location_pct")
     trigger = features.get("latest_limit_trigger") or {}
     volume5 = (features.get("volume") or {}).get("ratio5_to_prior20")
     today_volume = (features.get("volume") or {}).get("today_to_prior20")
@@ -393,6 +444,12 @@ def judging_helpers(features):
         and (overhead is None or overhead <= 25)
         and (profit is None or 35 <= profit <= 92)
     )
+    wash_chips_good = (
+        concentration70 is not None and concentration70 <= 16
+        and (concentration90 is None or concentration90 <= 32)
+        and (overhead is None or overhead <= 25)
+        and (profit is None or profit <= 92)
+    )
     shape_stable = (
         box.get("range_pct") is not None and box["range_pct"] <= 35
         and features.get("ma_spread_pct") is not None
@@ -400,19 +457,38 @@ def judging_helpers(features):
         and features.get("current_price", 0) >= features.get("support20", 0) * 0.97
     )
     volume_dry = volume5 is not None and volume5 <= 0.8
+    breakout_level = box.get("breakout_level", box.get("high"))
+    breakout_margin = box.get("breakout_margin_pct")
     breakout = (
-        box.get("high") is not None
-        and features.get("current_price", 0) >= box["high"] * 0.995
+        breakout_level is not None
+        and features.get("current_price", 0) >= breakout_level
         and today_volume is not None and today_volume >= 1.4
         and (features.get("return5_pct") or 0) > 0
     )
-    wash = (
+    breakout_strength = (
+        breakout
+        and day_return is not None and day_return >= 3
+        and close_location is not None and close_location >= 55
+        and breakout_margin is not None and breakout_margin >= 0
+    )
+    shrinking_wash = (
         5 <= trigger.get("bars_ago", 999) <= 45
         and trigger.get("high") is not None
         and features.get("current_price", 0) >= trigger.get("low", math.inf) * 0.98
         and -18 <= pct_change(features.get("current_price"), trigger.get("high")) <= -1
         and volume5 is not None and volume5 <= 0.9
     )
+    post_limit_hold = (
+        1 <= trigger.get("bars_ago", 999) <= 4
+        and trigger.get("high") is not None
+        and features.get("current_price", 0) >= trigger.get("low", math.inf) * 0.98
+        and (
+            features.get("ma", {}).get("20") is None
+            or features.get("current_price", 0) >= features["ma"]["20"]
+        )
+        and -18 <= pct_change(features.get("current_price"), trigger.get("high")) <= -1
+    )
+    wash = shrinking_wash or post_limit_hold
     high_position = (
         (range_position is not None and range_position >= 75)
         or (return20 is not None and return20 >= 35)
@@ -424,12 +500,44 @@ def judging_helpers(features):
         and features.get("current_price", 0) < features.get("support20", 0)
         and volume5 is not None and volume5 <= 0.8
     )
+    limit_count_1_60 = features.get("limit_count_1_60")
+    if limit_count_1_60 is None:
+        limit_count_1_60 = features.get("prior_limit_count_5_60", 0)
+    no_left_limit = limit_count_1_60 == 0
+    distance_to_high = box.get("distance_to_high_pct")
+    early_watch = (
+        no_left_limit
+        and range_position is not None and range_position <= 55
+        and box.get("range_pct") is not None and box["range_pct"] <= 15
+        and features.get("ma_spread_pct") is not None
+        and features["ma_spread_pct"] <= 3
+        and volume5 is not None and volume5 <= 0.9
+        and concentration70 is not None and concentration70 <= 16
+        and (concentration90 is None or concentration90 <= 32)
+        and (overhead is None or overhead <= 25)
+        and (profit is None or profit <= 92)
+        and (
+            (distance_to_high is not None and distance_to_high <= 5)
+            or (
+                range_position <= 20
+                and box.get("range_pct") is not None
+                and box["range_pct"] <= 15
+            )
+        )
+        and not high_position
+        and not shrinking_decline
+    )
     return {
         "chips_good": chips_good,
+        "wash_chips_good": wash_chips_good,
         "shape_stable": shape_stable,
         "volume_dry": volume_dry,
         "breakout": breakout,
+        "breakout_strength": breakout_strength,
         "wash": wash,
+        "shrinking_wash": shrinking_wash,
+        "post_limit_hold": post_limit_hold,
+        "early_watch": early_watch,
         "high_position": high_position,
         "shrinking_decline": shrinking_decline,
     }
@@ -454,12 +562,28 @@ def classify(features):
     score += 5 if 1 <= features.get("prior_limit_count_5_60", 0) <= 4 else 1
     score += 10 if checks["breakout"] else 7 if checks["wash"] else 3
     score += 3 if features.get("ma", {}).get("20") and features.get("current_price", 0) >= features["ma"]["20"] else 0
+    if checks["breakout_strength"]:
+        day_return = features.get("day_return_pct")
+        score += 15 if day_return is not None and day_return >= 9.4 else 10
+        if (features.get("close_location_pct") or 0) >= 70:
+            score += 4
+        if (
+            (features.get("box30") or {}).get("breakout_margin_pct") or 0
+        ) >= 1:
+            score += 3
     score = min(100, score)
 
     exclusions = []
     if features.get("bar_count", 0) < 80:
         exclusions.append("日K不足 80 根，时间沉淀不足")
-    if not features.get("prior_limit_count_5_60"):
+    if (
+        not (
+            features.get("limit_count_1_60")
+            if features.get("limit_count_1_60") is not None
+            else features.get("prior_limit_count_5_60", 0)
+        )
+        and not checks["early_watch"]
+    ):
         exclusions.append("近 5-60 个交易日缺少左侧涨停建仓证据")
     if features.get("one_word_chain_recent"):
         exclusions.append("近期出现连续一字板，存在筹码断层")
@@ -471,10 +595,10 @@ def classify(features):
         exclusions.append("筹码分散，未形成有效底部密集峰")
 
     if exclusions:
-        status = "高位排除" if checks["high_position"] else "排除"
-    elif checks["breakout"]:
+        status = "排除"
+    elif checks["breakout_strength"]:
         status = "启动初段"
-    elif checks["wash"]:
+    elif checks["wash"] and checks["wash_chips_good"]:
         status = "洗盘中"
     elif checks["volume_dry"] and checks["shape_stable"] and checks["chips_good"]:
         status = "待启动"
@@ -487,14 +611,21 @@ def classify(features):
     else:
         status = "只观察"
 
-    if status in ("建仓完成", "洗盘中", "待启动", "启动初段") and not checks["chips_good"]:
+    if status in ("建仓完成", "待启动") and not checks["chips_good"]:
         status = "只观察"
+    if checks["early_watch"]:
+        status = "只观察"
+        exclusions.append("早期观察通道：无左侧涨停，等待放量突破")
+    if checks["breakout"] and not checks["breakout_strength"]:
+        status = "只观察"
+        exclusions.append("突破确认不足：当日涨幅、突破幅度或收盘位置未达启动门槛")
     return status, score, checks, exclusions
 
 
-def analyze_row(quote, cutoff=None):
-    bars, source, limitations = market_data.fetch_kline(
-        quote["code"], 120, cutoff)
+def analyze_row(quote, cutoff=None, bars=None, source=None, limitations=None):
+    if bars is None:
+        bars, source, limitations = market_data.fetch_kline(
+            quote["code"], 500 if cutoff else 120, cutoff)
     features = build_features(quote, bars, cutoff)
     status, score, checks, exclusions = classify(features)
     if (
@@ -520,6 +651,78 @@ def analyze_row(quote, cutoff=None):
         "limitations": limitations,
         "metric_quality": "degraded" if limitations else "exact",
     }
+
+
+def scan_historical_universe(price_max, cutoff, workers, universe_only=False):
+    """回放目标日的全市场低价股票，股票池和价格都不取当前快照。"""
+    universe = fetch_mainboard_universe(1e12)
+    rows = []
+    eligible_count = 0
+
+    def work(raw):
+        bars, source, limitations = market_data.fetch_kline(
+            raw["code"], 500, cutoff)
+        bars = market_data.filter_bars(bars, cutoff)
+        if not bars:
+            raise RuntimeError("目标日前日K未获取")
+        quote = historical_quote(raw["code"], raw.get("name"), bars[-1])
+        if quote.get("price") is None or quote["price"] >= price_max:
+            return None
+        if universe_only:
+            return {
+                "code": quote["code"],
+                "name": quote.get("name"),
+                "price": quote["price"],
+                "quote_date": quote.get("quote_date"),
+                "data_date": quote.get("quote_date"),
+                "status": "行情列表",
+                "technical_score": None,
+                "theme_confirmation": "未核验",
+                "exclusions": [],
+            }
+        return analyze_row(
+            quote, cutoff, bars=bars, source=source, limitations=limitations)
+
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, 16))) as executor:
+        futures = {
+            executor.submit(work, raw): raw
+            for raw in universe
+        }
+        for future in as_completed(futures):
+            raw = futures[future]
+            try:
+                row = future.result()
+                if row is not None:
+                    rows.append(row)
+                    eligible_count += 1
+            except Exception as exc:  # noqa: BLE001 单票失败保留数据缺失
+                rows.append({
+                    "code": raw["code"],
+                    "name": raw.get("name"),
+                    "price": None,
+                    "quote_date": None,
+                    "data_date": None,
+                    "status": "排除",
+                    "technical_score": 0,
+                    "exclusions": ["数据未获取：{}".format(exc)],
+                    "theme_confirmation": "未核验",
+                    "metric_quality": "unavailable",
+                })
+    status_order = {
+        "启动初段": 0,
+        "待启动": 1,
+        "洗盘中": 2,
+        "建仓完成": 3,
+        "只观察": 4,
+        "排除": 5,
+        "行情列表": 6,
+    }
+    rows.sort(key=lambda row: (
+        status_order.get(row.get("status"), 9),
+        -(row.get("technical_score") or 0),
+        row.get("code") or "",
+    ))
+    return rows, len(universe), eligible_count
 
 
 def scan_rows(quotes, cutoff, scan_limit, workers):
@@ -552,8 +755,7 @@ def scan_rows(quotes, cutoff, scan_limit, workers):
         "洗盘中": 2,
         "建仓完成": 3,
         "只观察": 4,
-        "高位排除": 5,
-        "排除": 6,
+        "排除": 5,
     }
     rows.sort(key=lambda row: (
         status_order.get(row.get("status"), 9),
@@ -578,6 +780,8 @@ def compact_payload(payload, limit):
             "technical_score": row.get("technical_score"),
             "quote_date": row.get("quote_date"),
             "data_date": row.get("data_date"),
+            "day_return_pct": features.get("day_return_pct"),
+            "close_location_pct": features.get("close_location_pct"),
             "range_position_pct": features.get("range_position_pct"),
             "return20_pct": features.get("return20_pct"),
             "return60_pct": features.get("return60_pct"),
@@ -586,6 +790,10 @@ def compact_payload(payload, limit):
             "overhead_to_cost90_pct": features.get("overhead_to_cost90_pct"),
             "volume5_to_prior20": (features.get("volume") or {}).get("ratio5_to_prior20"),
             "prior_limit_count_5_60": features.get("prior_limit_count_5_60"),
+            "limit_count_1_60": features.get("limit_count_1_60"),
+            "breakout_margin_pct": (
+                features.get("box30") or {}).get("breakout_margin_pct"),
+            "early_watch": (row.get("checks") or {}).get("early_watch"),
             "theme_confirmation": row.get("theme_confirmation"),
             "exclusions": row.get("exclusions") or [],
             "metric_quality": row.get("metric_quality"),
@@ -670,6 +878,33 @@ def main():
         direct_rows = []
         for code in codes:
             try:
+                if cutoff:
+                    bars, _source, _limitations = market_data.fetch_kline(
+                        code, 500, cutoff)
+                    bars = market_data.filter_bars(bars, cutoff)
+                    if not bars:
+                        raise RuntimeError("{} 未获取到目标日前日K".format(code))
+                    current = market_data.fetch_tencent_quotes([code]).get(code) or {}
+                    quote = historical_quote(
+                        code, current.get("name") or code, bars[-1])
+                    if (
+                        quote.get("price") is not None
+                        and quote["price"] < args.price_max
+                    ):
+                        quotes.append(quote)
+                    else:
+                        direct_rows.append({
+                            "code": code,
+                            "name": quote.get("name"),
+                            "price": quote.get("price"),
+                            "quote_date": quote.get("quote_date"),
+                            "data_date": quote.get("quote_date"),
+                            "status": "排除",
+                            "technical_score": 0,
+                            "exclusions": ["价格不在用户限定范围内"],
+                            "theme_confirmation": "未核验",
+                        })
+                    continue
                 quote = code_to_quote(code)
                 if quote.get("price") is not None and quote["price"] < args.price_max:
                     quotes.append(quote)
@@ -704,27 +939,35 @@ def main():
         ))
         mode = "codes"
         universe_count = len(codes)
+        eligible_count = len(quotes)
         scan_quotes = quotes
     else:
-        quotes = fetch_mainboard_universe(args.price_max)
-        mode = "universe"
-        universe_count = len(quotes)
-        if args.universe_only:
-            rows = [{
-                "code": quote["code"],
-                "name": quote["name"],
-                "price": quote["price"],
-                "quote_date": quote["quote_date"],
-                "data_date": quote["quote_date"],
-                "status": "行情列表",
-                "technical_score": None,
-                "theme_confirmation": "未核验",
-                "exclusions": [],
-            } for quote in quotes]
-            rows = rows[:args.display_limit]
+        if cutoff:
+            rows, universe_count, eligible_count = scan_historical_universe(
+                args.price_max, cutoff, args.workers, args.universe_only)
+            mode = "historical_universe"
+            scan_quotes = rows
         else:
-            scan_quotes = preselect_quotes(quotes, args.scan_limit)
-            rows = scan_rows(scan_quotes, cutoff, 0, args.workers)
+            quotes = fetch_mainboard_universe(args.price_max)
+            mode = "universe"
+            universe_count = len(quotes)
+            eligible_count = len(quotes)
+            if args.universe_only:
+                rows = [{
+                    "code": quote["code"],
+                    "name": quote["name"],
+                    "price": quote["price"],
+                    "quote_date": quote["quote_date"],
+                    "data_date": quote["quote_date"],
+                    "status": "行情列表",
+                    "technical_score": None,
+                    "theme_confirmation": "未核验",
+                    "exclusions": [],
+                } for quote in quotes]
+                rows = rows[:args.display_limit]
+            else:
+                scan_quotes = preselect_quotes(quotes, args.scan_limit)
+                rows = scan_rows(scan_quotes, cutoff, 0, args.workers)
 
     dates = [row.get("data_date") for row in rows if row.get("data_date")]
     data_date = max(dates) if dates else (cutoff or None)
@@ -737,7 +980,8 @@ def main():
         "data_date": data_date,
         "generated_at": generated_at,
         "universe_count": universe_count,
-        "scanned_count": 0 if args.universe_only else len(scan_quotes),
+        "scanned_count": 0 if args.universe_only and not cutoff else len(scan_quotes),
+        "eligible_count": eligible_count,
         "rows": rows,
         "report_path": report_path,
         "note": "只提供结构化行情证据；题材、公告与消息必须另行核验。",

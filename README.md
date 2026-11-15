@@ -124,6 +124,15 @@ python D:\github\hit-it\leader-hit\scripts\prepare_leader_candidates.py --price-
 python D:\github\hit-it\leader-hit\scripts\prepare_leader_candidates.py --codes 600000,000001 --compact
 ```
 
+2026 年主升样本时点回测：
+
+```powershell
+python D:\github\hit-it\leader-hit\scripts\prepare_leader_candidates.py --date 20260928 --price-max 15 --compact
+python D:\github\hit-it\leader-hit\scripts\review_leader_snapshot.py --date 20260928 --price-max 15
+python D:\github\hit-it\leader-hit\scripts\backtest_leader_hit.py --start 20260101 --end 20260630
+python D:\github\hit-it\leader-hit\scripts\backtest_leader_hit.py --start 20260701 --end 20261113 --report-tag 测试集
+```
+
 输出固定状态为“建仓完成 / 洗盘中 / 待启动 / 启动初段 / 只观察 / 排除”。技术结构通过后，仍需核验精确概念、板块扩散、新闻和公告。
 
 ## 脚本说明
