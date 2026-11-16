@@ -261,7 +261,15 @@ def row_themes(row, concepts):
     return themes_for(row.get("code"), concepts)
 
 
-def theme_summary(current_rows, previous_rows, concepts):
+def precise_themes(row, concepts):
+    return [
+        theme for theme in row_themes(row, concepts)
+        if not theme.startswith("名称组:")
+    ]
+
+
+def theme_summary(current_rows, previous_rows, concepts, excluded_codes=None):
+    excluded_codes = excluded_codes or set()
     current_by_theme = collections.defaultdict(list)
     previous_by_theme = collections.defaultdict(list)
     for row in current_rows:
@@ -288,6 +296,7 @@ def theme_summary(current_rows, previous_rows, concepts):
                 row["code"] for row in rows
                 if row.get("board_count") in (1, 2)
                 and is_mainboard_code(row.get("code"))
+                and row["code"] not in excluded_codes
             ],
         })
     return sorted(
@@ -314,13 +323,66 @@ def find_yesterday_high(previous_rows, current_data):
             "code": stock["code"],
             "name": stock.get("name"),
             "board_count": max_board,
+            "industry": stock.get("industry"),
+            "themes": stock.get("themes") or [],
             "today_open": today.get("today_open"),
             "gap_pct": today.get("gap_pct"),
             "today_pct": today.get("today_pct"),
             "close_state": today.get("close_state"),
             "continue_limit": today.get("continue_limit"),
+            "suspended": bool(today.get("suspended")),
         })
     return {"board_count": max_board, "stocks": output}
+
+
+def suspension_filter(candidates, yesterday_high):
+    """最高板停牌时排除同行业或共享精确概念的一/二板候选。"""
+    suspended = [
+        stock for stock in (yesterday_high or {}).get("stocks", [])
+        if stock.get("suspended")
+    ]
+    industries = list(dict.fromkeys(
+        stock["industry"] for stock in suspended
+        if stock.get("industry") and stock["industry"] not in ("-", "未获取")
+    ))
+    themes = list(dict.fromkeys(
+        theme
+        for stock in suspended
+        for theme in stock.get("themes") or []
+        if not theme.startswith("名称组:")
+    ))
+    excluded = []
+    for candidate in candidates:
+        same_industry = bool(
+            candidate.get("industry")
+            and candidate["industry"] not in ("-", "未获取")
+            and candidate["industry"] in industries
+        )
+        matched_themes = [
+            theme for theme in precise_themes(candidate, {})
+            if theme in themes
+        ]
+        if same_industry or matched_themes:
+            excluded.append({
+                "code": candidate.get("code"),
+                "name": candidate.get("name"),
+                "matched_themes": matched_themes,
+                "same_industry": same_industry,
+            })
+    return {
+        "suspended_stocks": [
+            {
+                "code": stock.get("code"),
+                "name": stock.get("name"),
+                "board_count": stock.get("board_count"),
+            }
+            for stock in suspended
+        ],
+        "themes": themes,
+        "industries": industries,
+        "excluded_count": len(excluded),
+        "excluded": excluded,
+    }
 
 
 def mode_feedback(previous_rows, current_data):
@@ -335,11 +397,13 @@ def mode_feedback(previous_rows, current_data):
             row for row in previous_rows
             if row.get("board_count") == board_count
         ]
-        rows = [
+        matched_rows = [
             performance[row["code"]]
             for row in previous_group
             if row["code"] in performance
         ]
+        suspended = sum(bool(row.get("suspended")) for row in matched_rows)
+        rows = [row for row in matched_rows if not row.get("suspended")]
         gaps = [row["gap_pct"] for row in rows if row.get("gap_pct") is not None]
         closes = [
             row["today_pct"] for row in rows
@@ -349,13 +413,14 @@ def mode_feedback(previous_rows, current_data):
         high_open = sum(value > 0 for value in gaps)
         return {
             "mode": mode_name,
-            "sample": len(previous_group),
+            "sample": len(previous_group) - suspended,
+            "suspended": suspended,
             "quoted": len(gaps),
             "matched_performance": len(rows),
             "promoted": promoted,
             "promotion_rate_pct": (
-                round(promoted * 100.0 / len(previous_group), 2)
-                if previous_group else None
+                round(promoted * 100.0 / (len(previous_group) - suspended), 2)
+                if len(previous_group) > suspended else None
             ),
             "high_open": high_open,
             "high_open_rate_pct": (
@@ -406,16 +471,24 @@ def build_payload():
         if "themes" not in row:
             row["themes"] = themes_for(row["code"], concepts)
 
-    themes = theme_summary(current_rows, previous_rows, concepts)
     yesterday_high = find_yesterday_high(previous_rows, current)
-    feedback = mode_feedback(previous_rows, current)
-
     one_two_candidates = [
         row for row in current_rows
         if row.get("board_count") in (1, 2)
     ]
-    candidates = select_candidates(current_rows)
-    board_permission_excluded = len(one_two_candidates) - len(candidates)
+    permitted_candidates = select_candidates(current_rows)
+    board_permission_excluded = len(one_two_candidates) - len(permitted_candidates)
+    suspension = suspension_filter(permitted_candidates, yesterday_high)
+    suspended_excluded_codes = {
+        row["code"] for row in suspension["excluded"]
+    }
+    candidates = [
+        row for row in permitted_candidates
+        if row["code"] not in suspended_excluded_codes
+    ]
+    themes = theme_summary(
+        current_rows, previous_rows, concepts, suspended_excluded_codes)
+    feedback = mode_feedback(previous_rows, current)
     metric_payload = run_json(
         "fetch_stock_metrics.py",
         "--codes", ",".join(row["code"] for row in candidates),
@@ -474,6 +547,7 @@ def build_payload():
         "quote_date": current.get("quote_date"),
         "board_permission": BOARD_PERMISSION,
         "board_permission_excluded_count": board_permission_excluded,
+        "suspension_filter": suspension,
         "previous_source": previous_source,
         "previous_pool_report": str(previous_path),
         "previous_pool_generated": previous_generated,
@@ -584,6 +658,7 @@ def build_compact_payload(payload, theme_limit=30):
         "board_permission": payload.get("board_permission"),
         "board_permission_excluded_count": payload.get(
             "board_permission_excluded_count"),
+        "suspension_filter": payload.get("suspension_filter"),
         "report_path": payload.get("report_path"),
         "previous_source": payload.get("previous_source"),
         "previous_pool_report": payload.get("previous_pool_report"),
@@ -614,6 +689,13 @@ def print_text(payload):
     print("板块权限：{}（权限外 1/2 板排除 {} 只）".format(
         payload.get("board_permission"),
         payload.get("board_permission_excluded_count")))
+    suspension = payload.get("suspension_filter") or {}
+    print("停牌最高板：{}（同行业/精确概念排除 {} 只）".format(
+        "、".join(
+            "{}（{}）".format(row["name"], row["code"])
+            for row in suspension.get("suspended_stocks") or []
+        ) or "无",
+        suspension.get("excluded_count", 0)))
     print("=" * 112)
     print("昨日来源：{}".format(payload["previous_source"]))
     print("昨日涨停池：{}（新生成：{}）".format(

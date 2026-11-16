@@ -30,6 +30,7 @@ import argparse
 import collections
 import json
 import os
+import statistics
 import sys
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -242,6 +243,7 @@ def fetch_quotes(sec_codes):
                 "price": to_float(f[3]),
                 "prev_close": to_float(f[4]),
                 "open": to_float(f[5]),
+                "volume_hands": to_float(f[6]),
                 "high": to_float(f[33]),
                 "low": to_float(f[34]),
                 "pct": to_float(f[32]),
@@ -480,43 +482,63 @@ def close_state(code, pct, zt_codes, dt_codes):
     return "平"
 
 
-def prev_zt_today_rows(prev_zt_rows, quotes, zt_codes, dt_codes):
+def quote_is_suspended(quote, data_date):
+    """零成交报价只在行情日与数据日一致时视为停牌。"""
+    if not quote or quote.get("quote_date") != data_date:
+        return False
+    values = [quote.get(key) for key in ("open", "high", "low", "volume_hands")]
+    return all(value is not None and value == 0 for value in values)
+
+
+def prev_zt_today_rows(prev_zt_rows, quotes, zt_codes, dt_codes, data_date=None):
     """昨日涨停股今日逐只分类：开盘涨幅与类别 + 尾盘状态，供板块强弱与分化分析。"""
+    data_date = data_date or resolve_quote_date(quotes)
     rows = []
     for r in prev_zt_rows:
         q = quotes.get(r["code"][2:]) or {}
+        suspended = quote_is_suspended(q, data_date)
         open_px = q.get("open")
         prev_close = q.get("prev_close")
         gap_pct = None
-        if open_px is not None and prev_close:
+        if not suspended and open_px is not None and prev_close:
             gap_pct = round((open_px - prev_close) * 100.0 / prev_close, 2)
-        pct = q.get("pct")
+        pct = None if suspended else q.get("pct")
         rows.append({
             "code": r["code"],
             "name": r["name"],
             "industry": r["industry"],
             "board_count": r.get("board_count"),
             "last_amount_yi": r["amount_yi"],
-            "today_open": open_px,
+            "today_open": None if suspended else open_px,
             "prev_close": prev_close,
             "gap_pct": gap_pct,
             "open_class": open_class(gap_pct),
             "today_pct": pct,
-            "close_state": close_state(r["code"], pct, zt_codes, dt_codes),
-            "continue_limit": r["code"] in zt_codes,
+            "close_state": "停牌" if suspended else close_state(
+                r["code"], pct, zt_codes, dt_codes),
+            "continue_limit": False if suspended else r["code"] in zt_codes,
+            "suspended": suspended,
         })
     return rows
 
 
 def open_close_summary(rows):
     """一组昨日涨停股的开盘/尾盘分类计数与均值。"""
-    quoted = [r for r in rows if r["open_class"] != "-"]
+    suspended = sum(bool(r.get("suspended")) for r in rows)
+    quoted = [
+        r for r in rows
+        if not r.get("suspended") and r["open_class"] != "-"
+    ]
     gaps = [r["gap_pct"] for r in quoted]
-    pcts = [r["today_pct"] for r in rows if r["today_pct"] is not None]
+    pcts = [
+        r["today_pct"] for r in rows
+        if not r.get("suspended") and r["today_pct"] is not None
+    ]
     return {
         "sample": len(rows),
         "quoted": len(quoted),
-        "missing_quote": len(rows) - len(quoted),
+        "missing_quote": len(rows) - len(quoted) - suspended,
+        "suspended": suspended,
         "up_open": sum(1 for r in quoted if r["open_class"] == "高开"),
         "flat_open": sum(1 for r in quoted if r["open_class"] == "平开"),
         "down_open": sum(1 for r in quoted if r["open_class"] == "低开"),
@@ -526,6 +548,7 @@ def open_close_summary(rows):
         "down": sum(1 for r in rows if r["close_state"] == "下跌"),
         "limit_down": sum(1 for r in rows if r["close_state"] == "跌停"),
         "avg_gap_pct": round(sum(gaps) / len(gaps), 2) if gaps else None,
+        "median_gap_pct": round(statistics.median(gaps), 2) if gaps else None,
         "avg_pct": round(sum(pcts) / len(pcts), 2) if pcts else None,
     }
 
@@ -560,9 +583,10 @@ def board_bucket(board_count):
     return "四板及以上"
 
 
-def industry_promotion_stats(prev_zt_rows, zt_rows, zb_rows):
+def industry_promotion_stats(prev_zt_rows, zt_rows, zb_rows, suspended_codes=None):
     """分板块晋级与炸板统计：晋级率 = 该板块昨日涨停今日继续涨停 / 该板块昨日涨停；
     炸板率 = 该板块今日炸板 /（该板块今日涨停 + 该板块今日炸板）。"""
+    suspended_codes = suspended_codes or set()
     groups = {}
 
     def bucket(industry):
@@ -580,6 +604,8 @@ def industry_promotion_stats(prev_zt_rows, zt_rows, zb_rows):
 
     prev_codes_by_industry = {}
     for r in prev_zt_rows:
+        if r["code"] in suspended_codes:
+            continue
         bucket(r["industry"])["prev_zt_count"] += 1
         prev_codes_by_industry.setdefault(r["industry"], set()).add(r["code"])
     today_codes = set(r["code"] for r in zt_rows)
@@ -616,7 +642,11 @@ def build_json_payload(base_str, prev_str, quote_date, status, notes,
     prev_codes = set(r["code"] for r in prev_zt_rows)
     today_codes = set(r["code"] for r in zt_rows)
     dt_codes = set(r["code"] for r in dt_rows)
-    today_rows = prev_zt_today_rows(prev_zt_rows, quotes, today_codes, dt_codes)
+    today_rows = prev_zt_today_rows(
+        prev_zt_rows, quotes, today_codes, dt_codes, base_str)
+    suspended_codes = {
+        row["code"] for row in today_rows if row.get("suspended")
+    }
     board_stats = board_structure(zt_rows)
     saved_market = previous_market or {}
     prev_zt_n = len(prev_zt_rows)
@@ -668,6 +698,8 @@ def build_json_payload(base_str, prev_str, quote_date, status, notes,
         },
         "yesterday_performance": {
             "prev_zt_count": len(prev_zt_rows),
+            "eligible_count": len(prev_zt_rows) - len(suspended_codes),
+            "suspended_count": len(suspended_codes),
             "promote_count": len(prev_codes & today_codes),
             "rows": today_rows,
         },
@@ -676,7 +708,7 @@ def build_json_payload(base_str, prev_str, quote_date, status, notes,
             "by_industry": open_close_by_industry(today_rows, min_sample=1),
         },
         "industry_promotion": industry_promotion_stats(
-            prev_zt_rows, zt_rows, zb_rows),
+            prev_zt_rows, zt_rows, zb_rows, suspended_codes),
         "industry_dist": industry_distribution(zt_rows),
         "zb_rows": zb_rows[:10],
         "zb_all_rows": zb_rows,
@@ -781,25 +813,33 @@ def render_text(base, prev, zt_rows, zb_rows, dt_rows, prev_zt_rows,
 
     lines.append("## 三、昨日涨停今日表现（晋级与炸板）")
     lines.append("")
+    zt_codes = set(r["code"] for r in zt_rows)
+    dt_codes = set(r["code"] for r in dt_rows)
+    today_rows = []
     if not prev_zt_n:
         lines.append("昨日无涨停数据（或接口仅覆盖近 30 个交易日），无法计算晋级率。")
     else:
         prev_codes = set(r["code"] for r in prev_zt_rows)
-        today_codes = set(r["code"] for r in zt_rows)
+        today_codes = zt_codes
         promote = sorted(prev_codes & today_codes)
-        rate = len(promote) * 100.0 / prev_zt_n
-        lines.append("- 昨日涨停 {} 只；今日继续涨停 {} 只（晋级率 {}%）".format(
-            prev_zt_n, len(promote), fmt_num(rate, 1)))
+        today_rows = prev_zt_today_rows(
+            prev_zt_rows, quotes, today_codes, dt_codes, base.strftime("%Y%m%d"))
+        suspended_codes = {
+            row["code"] for row in today_rows if row.get("suspended")
+        }
+        eligible_count = prev_zt_n - len(suspended_codes)
+        rate = len(promote) * 100.0 / eligible_count if eligible_count else None
+        lines.append("- 昨日涨停 {} 只，剔除停牌 {} 只；今日继续涨停 {} 只（晋级率 {}%）".format(
+            prev_zt_n, len(suspended_codes), len(promote), fmt_num(rate, 1)))
         valid = []
-        for r in prev_zt_rows:
-            q = quotes.get(r["code"][2:])
-            if q and q["pct"] is not None:
-                valid.append(q)
+        for row in today_rows:
+            if not row.get("suspended") and row["today_pct"] is not None:
+                valid.append(row)
         if quote_date == base.strftime("%Y%m%d") and valid:
-            up = sum(1 for q in valid if q["pct"] > 0)
-            down = sum(1 for q in valid if q["pct"] < 0)
-            flat = sum(1 for q in valid if q["pct"] == 0)
-            avg = sum(q["pct"] for q in valid) / len(valid)
+            up = sum(1 for row in valid if row["today_pct"] > 0)
+            down = sum(1 for row in valid if row["today_pct"] < 0)
+            flat = sum(1 for row in valid if row["today_pct"] == 0)
+            avg = sum(row["today_pct"] for row in valid) / len(valid)
             lines.append("- 有行情 {} 只：上涨 {} / 下跌 {} / 平 {}；平均涨幅 {}%".format(
                 len(valid), up, down, flat, fmt_num(avg, 2)))
         elif valid:
@@ -865,22 +905,25 @@ def render_text(base, prev, zt_rows, zb_rows, dt_rows, prev_zt_rows,
                 r["industry"]))
         lines.append("")
 
-    zt_codes = set(r["code"] for r in zt_rows)
-    dt_codes = set(r["code"] for r in dt_rows)
     lines.append("## 五、昨日涨停股今日开盘与尾盘分类（板块强弱与分化）")
     lines.append("")
     if not prev_zt_rows:
         lines.append("昨日无涨停数据（或接口仅覆盖近 30 个交易日），无法分类。")
     else:
-        today_rows = prev_zt_today_rows(prev_zt_rows, quotes, zt_codes, dt_codes)
+        if not today_rows:
+            today_rows = prev_zt_today_rows(
+                prev_zt_rows, quotes, zt_codes, dt_codes, base.strftime("%Y%m%d"))
         overall = open_close_summary(today_rows)
-        lines.append("- 总体：昨日涨停 {} 只，取到行情 {} 只；高开 {} / 平开 {} / 低开 {}；"
+        lines.append("- 总体：昨日涨停 {} 只，有效开盘 {} 只，行情缺失 {} 只，停牌 {} 只；"
+                     "高开 {} / 平开 {} / 低开 {}；"
                      "尾盘 涨停 {} / 上涨 {} / 平 {} / 下跌 {} / 跌停 {}；"
-                     "平均开盘 {}% / 平均涨跌 {}%。".format(
-                         overall["sample"], overall["quoted"], overall["up_open"],
+                     "平均开盘 {}% / 中位开盘 {}% / 平均涨跌 {}%。".format(
+                         overall["sample"], overall["quoted"], overall["missing_quote"],
+                         overall["suspended"], overall["up_open"],
                          overall["flat_open"], overall["down_open"], overall["limit_up"],
                          overall["up"], overall["flat"], overall["down"],
                          overall["limit_down"], fmt_num(overall["avg_gap_pct"]),
+                         fmt_num(overall["median_gap_pct"]),
                          fmt_num(overall["avg_pct"])))
         if overall["missing_quote"]:
             lines.append("- 未取到行情的 {} 只不计入开盘分类（按接口实际条数写并注明）。"
@@ -904,7 +947,11 @@ def render_text(base, prev, zt_rows, zb_rows, dt_rows, prev_zt_rows,
     lines.append("")
     lines.append("## 六、分板块晋级与炸板统计（含板数结构）")
     lines.append("")
-    promos = industry_promotion_stats(prev_zt_rows, zt_rows, zb_rows)
+    suspended_codes = {
+        row["code"] for row in today_rows if row.get("suspended")
+    }
+    promos = industry_promotion_stats(
+        prev_zt_rows, zt_rows, zb_rows, suspended_codes)
     if not promos:
         lines.append("无涨停或炸板数据。")
     else:

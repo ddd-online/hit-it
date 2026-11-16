@@ -34,13 +34,14 @@ python limit-hit/scripts/prepare_candidates.py --compact
 2. 读取 `report/涨停池/<previous_date>.json`；文件不存在、损坏或日期不符时停止运行，并提示先运行保存脚本；
 3. 批量取精确概念，并按概念与“东方系/羊字辈”等名称组聚合；
 4. 计算每组今日涨停、昨日涨停、晋级数、最高板和板数结构；
-5. 批量计算所有 1/2 板候选的：
+5. 先保留当日 1/2 板，再执行沪深主板权限过滤；若昨日最高板停牌，继续排除与其同行业或共享精确概念的候选。被这两步排除的股票不再请求个股指标；
+6. 对剩余 1/2 板候选批量计算：
    - 首封/末封、开板次数、换手和封单占成交额；
    - 近 5/10/20 日涨幅、MA5/10/20；
    - 5 日量比、开盘差、最低价相对昨收差；
    - 获利盘、平均成本、90% 筹码集中度、筹码峰；
-6. 输出数据限制、异常和“一字板/尾盘首封/开板过多/换手过热”等事实标签；
-7. 输出一进二、二进三分模式晋级/高开统计，以及当前最高板和 2 板及以上家数。
+7. 输出数据限制、异常和“一字板/尾盘首封/开板过多/换手过热”等事实标签；
+8. 输出一进二、二进三分模式晋级/高开统计，以及当前最高板和 2 板及以上家数。
 
 脚本不计算最终候选分，不决定题材强弱，不判断消息真假，不输出“可打板”。
 
@@ -60,14 +61,15 @@ python limit-hit/scripts/prepare_candidates.py --compact
 
 - `data_date`、`previous_date`、`quote_date`；
 - `board_permission`、`board_permission_excluded_count`：固定沪深主板权限及被排除的一/二板数量；
+- `suspension_filter`：停牌最高板、触发的行业/精确概念、连带排除数及逐股排除明细；
 - `report_path`：由 `data_date` 生成的 `report/打板候选/YYYY-MM-DD.md`；
 - `previous_source`、`previous_pool_report`、`previous_pool_generated`（固定 `false`）、`previous_context`；
 - `current_pool_report`、`current_pool_generated`：固定为 `null`/`false`，运行时只处理实时快照，不落盘涨停池；
 - `market`：当日概览；
 - `market.max_board`、`market.two_plus_count`、`market.board_counts`：当前连板高度结构；
-- `yesterday_open`：昨日涨停今日高开/平开/低开分布；
-- `yesterday_highest_board`：昨日最高板及今日表现；
-- `mode_feedback`：昨日一进二、二进三的样本、晋级率、高开率和平均开盘/收盘；
+- `yesterday_open`：昨日涨停总样本、有效开盘、行情缺失、停牌和高开/平开/低开分布；
+- `yesterday_highest_board`：昨日最高板及今日表现，每项含行业、精确概念/名称组、停牌状态；
+- `mode_feedback`：昨日一进二、二进三的有效样本、停牌数、晋级率、高开率和平均开盘/收盘；
 - `themes`：题材聚合与板数结构；
 - `candidates`：所有当日 1/2 板候选及原始指标；
 - `minutes_since_first_seal`、`minutes_since_last_seal`、`is_reseal`：判断是否刚封、刚回封或封板已久；
@@ -75,7 +77,9 @@ python limit-hit/scripts/prepare_candidates.py --compact
 
 `--compact` 顶层保留 `schema`、行情日期、上游来源、市场情绪、分模式反馈、题材聚合、扁平化候选、指标质量摘要和限制；默认只列前 30 个题材并给出 `theme_total_count`、`themes_truncated`，完整题材列表使用 `--json`。候选不再嵌套完整 `metrics`，百分数保留 2 位。
 
-板块权限固定为沪深主板：沪市 `600/601/603/605`，深市 `000/001/002/003`。创业板、科创板和北交所股票不会进入 `candidates` 或题材的 `candidate_codes`。
+板块权限固定为沪深主板：沪市 `600/601/603/605`，深市 `000/001/002/003`。创业板、科创板和北交所股票不会进入 `candidates` 或题材的 `candidate_codes`。停牌最高板同行业或共享精确概念的候选也不会进入 `candidates` 或 `candidate_codes`，但 `themes[].current_count` 和板数结构仍保留全市场涨停事实。
+
+停牌只按报价型启发式识别：个股行情日等于 `data_date`，且今开、最高、最低、成交量均为 0。股票不在行情响应中或字段完全缺失时是“行情缺失”，不是停牌。盘前零成交也不在 `limit-hit` 合法运行窗口内，不得复用 `suspended` 状态。
 
 候选的 `metric_quality`：
 
