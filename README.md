@@ -7,7 +7,7 @@
 
 项目不负责资金分配、仓位管理或账户下单。所有报告均不构成投资建议。
 
-当前版本：1.2.0 · [查看发布记录](https://github.com/ddd-online/hit-it/releases)
+当前版本：1.3.0 · [查看发布记录](https://github.com/ddd-online/hit-it/releases)
 
 ## 能力边界
 
