@@ -1,26 +1,41 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""为 limit-hit 预计算当日候选上下文。
+"""为 limit-hit 预计算批量候选或单股持仓审视上下文。
 
 脚本只做数据装配、聚合和指标计算，不输出买卖结论：
 - 当日涨停通过技能内取数脚本实拉；
 - 昨日涨停池必须由 save_limit_pool.py 预先保存到 report/涨停池，缺失即停止；
 - 运行时只拉当日实时涨停池，不自动生成或覆盖涨停池文件；
 - 批量聚合精确概念和名称情绪组；
-- 批量计算日K趋势、洗盘路径、量比和筹码。
+- 批量计算日K趋势、洗盘路径、量比和筹码；
+- 单股模式可按名称或代码获取报价、量价、筹码和题材，不要求当日涨停。
 """
 
 import argparse
 import collections
 import json
+import re
 import subprocess
 import sys
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 CN_TZ = timezone(timedelta(hours=8))
 BOARD_PERMISSION = "沪深主板"
+TENCENT_SUGGEST_URL = "https://smartbox.gtimg.cn/s3/?q={query}&t=all"
+EASTMONEY_SUGGEST_URL = (
+    "https://searchapi.eastmoney.com/api/suggest/get"
+    "?input={query}&type=14&token=D43BF722C8E33BDC906FB84D85E326E8&count=10"
+)
+STOCK_CODE_RE = re.compile(
+    r"^(?:(sh|sz|bj))?(\d{6})(?:\.(sh|sz|bj))?$", re.IGNORECASE)
+
+sys.path.insert(0, str(SCRIPT_DIR))
+
+import http_util  # noqa: E402 与脚本同目录的直连网络层
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -56,8 +71,34 @@ def build_report_path(data_date):
     return Path.cwd() / "report" / "打板候选" / "{}.md".format(data_date)
 
 
+def build_stock_report_path(data_date, code):
+    return Path.cwd() / "report" / "个股审视" / "{}_{}.md".format(data_date, code)
+
+
 def build_limit_pool_path(data_date):
     return Path.cwd() / "report" / "涨停池" / "{}.json".format(data_date)
+
+
+def normalize_stock_code(value):
+    """把裸代码、交易所前缀或后缀统一为 sh/sz/bj + 6 位数字。"""
+    text = str(value or "").strip().lower()
+    match = STOCK_CODE_RE.match(text)
+    if not match:
+        raise ValueError("代码格式应为 6 位数字，或带 sh/sz/bj 前缀：{}".format(value))
+    prefix, digits, suffix = match.groups()
+    exchange = prefix or suffix
+    if prefix and suffix and prefix != suffix:
+        raise ValueError("股票代码前后交易所不一致：{}".format(value))
+    if not exchange:
+        if digits.startswith("6"):
+            exchange = "sh"
+        elif digits.startswith(("0", "1", "2", "3")):
+            exchange = "sz"
+        elif digits.startswith(("4", "8", "9")):
+            exchange = "bj"
+        else:
+            raise ValueError("无法识别股票代码交易所：{}".format(value))
+    return "{}{}".format(exchange, digits)
 
 
 def is_mainboard_code(code):
@@ -74,6 +115,222 @@ def select_candidates(rows):
         if row.get("board_count") in (1, 2)
         and is_mainboard_code(row.get("code"))
     ]
+
+
+def parse_stock_suggestions(raw):
+    """解析腾讯证券检索结果，只保留 A 股。"""
+    text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+    match = re.search(r'v_hint="([^"]*)"', text)
+    if not match or not match.group(1):
+        return []
+    output = []
+    seen = set()
+    for item in match.group(1).split("^"):
+        fields = item.split("~")
+        if len(fields) < 5 or fields[4] != "GP-A":
+            continue
+        try:
+            code = normalize_stock_code("{}{}".format(fields[0], fields[1]))
+        except ValueError:
+            continue
+        if code in seen:
+            continue
+        seen.add(code)
+        name = fields[2].strip()
+        try:
+            name = json.loads('"{}"'.format(name))
+        except ValueError:
+            pass
+        output.append({"code": code, "name": name})
+    return output
+
+
+def parse_eastmoney_suggestions(raw):
+    """解析东方财富证券检索回退结果。"""
+    if isinstance(raw, bytes):
+        text = raw.decode("utf-8", errors="replace")
+        if "\ufffd" in text:
+            text = raw.decode("gb18030", errors="replace")
+    else:
+        text = str(raw)
+    payload = json.loads(text)
+    rows = ((payload.get("QuotationCodeTable") or {}).get("Data") or [])
+    output = []
+    seen = set()
+    for row in rows:
+        try:
+            code = normalize_stock_code(row.get("Code"))
+        except ValueError:
+            continue
+        if code in seen:
+            continue
+        seen.add(code)
+        output.append({"code": code, "name": str(row.get("Name") or "").strip()})
+    return output
+
+
+def fetch_stock_suggestions(query):
+    encoded = urllib.parse.quote(str(query).strip())
+    sources = (
+        (TENCENT_SUGGEST_URL.format(query=encoded), "https://gu.qq.com/",
+         parse_stock_suggestions),
+        (EASTMONEY_SUGGEST_URL.format(query=encoded), "https://quote.eastmoney.com/",
+         parse_eastmoney_suggestions),
+    )
+    errors = []
+    for url, referer, parser in sources:
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer": referer,
+            })
+            with http_util.open_url(req, timeout=15) as resp:
+                rows = parser(resp.read())
+            if rows:
+                return rows
+        except Exception as exc:  # noqa: BLE001 一个检索源失败后继续回退
+            errors.append(str(exc))
+    if errors:
+        raise RuntimeError("股票名称检索失败：{}".format("；".join(errors)))
+    return []
+
+
+def resolve_stock_query(query, suggestions_provider=None):
+    """代码直接规范化；名称要求唯一精确匹配，歧义时停止。"""
+    text = str(query or "").strip()
+    if not text:
+        raise ValueError("股票名称或代码不能为空")
+    try:
+        code = normalize_stock_code(text)
+    except ValueError:
+        code = None
+    if code:
+        return {"query": text, "code": code, "name": None}
+
+    provider = suggestions_provider or fetch_stock_suggestions
+    rows = provider(text)
+    if not rows:
+        raise ValueError("未找到股票：{}".format(text))
+    exact = [row for row in rows if row.get("name") == text]
+    if len(exact) == 1:
+        return {"query": text, **exact[0]}
+    if len(exact) > 1:
+        labels = "、".join("{}（{}）".format(row["name"], row["code"]) for row in exact)
+        raise ValueError("股票名称不唯一：{}；请输入代码".format(labels))
+    if len(rows) == 1:
+        return {"query": text, **rows[0]}
+    labels = "、".join("{}（{}）".format(row["name"], row["code"]) for row in rows[:8])
+    raise ValueError("股票名称不唯一或不够精确：{}；请输入代码".format(labels))
+
+
+def _pct_change(now, before):
+    if now is None or not before:
+        return None
+    return round((now / before - 1.0) * 100.0, 2)
+
+
+def _quote_date(quote):
+    value = str((quote or {}).get("datetime") or "")
+    return "{}-{}-{}".format(value[:4], value[4:6], value[6:8]) if len(value) >= 8 else None
+
+
+def build_stock_review(snapshot, data_date, query, stock, current, previous_rows,
+                       concepts, quote_payload, metrics, structure):
+    """装配单股事实，不输出持有或退出结论。"""
+    code = stock["code"]
+    quote = (quote_payload or {}).get("quote") or {}
+    kline = (quote_payload or {}).get("kline") or []
+    current_rows = current.get("zt_rows") or []
+    current_row = next((row for row in current_rows if row.get("code") == code), None)
+    previous_row = next((row for row in previous_rows if row.get("code") == code), None)
+    performance = {
+        row.get("code"): row
+        for row in (current.get("yesterday_performance") or {}).get("rows", [])
+    }.get(code)
+    broken_codes = {row.get("code") for row in current.get("zb_all_rows") or []}
+    down_codes = {row.get("code") for row in current.get("dt_rows") or []}
+
+    pct = quote.get("change_pct")
+    suspended = (
+        _quote_date(quote) == data_date
+        and all(quote.get(key) == 0 for key in ("open", "high", "low", "volume_hands"))
+    )
+    if current_row:
+        limit_status = "涨停"
+    elif code in broken_codes:
+        limit_status = "炸板"
+    elif code in down_codes:
+        limit_status = "跌停"
+    elif suspended:
+        limit_status = "停牌"
+    elif pct is None:
+        limit_status = "未获取"
+    elif pct > 0:
+        limit_status = "上涨"
+    elif pct < 0:
+        limit_status = "下跌"
+    else:
+        limit_status = "平"
+
+    quote_day = _quote_date(quote)
+    previous_volume = next(
+        (bar.get("volume") for bar in reversed(kline)
+         if bar.get("date") and quote_day and bar["date"] < quote_day),
+        None,
+    )
+    current_volume = quote.get("volume_hands")
+    if current_volume is None:
+        current_volume = (metrics or {}).get("last", {}).get("volume")
+    is_partial_day = bool(
+        quote_day == data_date
+        and (snapshot.hour, snapshot.minute) < (15, 0)
+    )
+    themes = (
+        current_row.get("themes") if current_row and "themes" in current_row
+        else previous_row.get("themes") if previous_row and "themes" in previous_row
+        else themes_for(code, concepts)
+    ) or []
+    limitations = list((metrics or {}).get("limitations") or [])
+    limitations.extend((structure or {}).get("limitations") or [])
+    return {
+        "query": query,
+        "code": code,
+        "name": quote.get("name") or stock.get("name") or code,
+        "themes": themes,
+        "quote_date": quote_day,
+        "quote_consistent": quote_day == data_date,
+        "current_limit_status": limit_status,
+        "in_current_limit_pool": current_row is not None,
+        "current_board_count": current_row.get("board_count") if current_row else None,
+        "in_previous_limit_pool": previous_row is not None,
+        "previous_board_count": previous_row.get("board_count") if previous_row else None,
+        "yesterday_performance": performance,
+        "quote": quote,
+        "metrics": metrics or {},
+        "structure": {
+            "holders": (structure or {}).get("holders") or [],
+            "chips": (structure or {}).get("chips") or (metrics or {}).get("chips"),
+            "sources": (structure or {}).get("source") or {},
+        },
+        "intraday": {
+            "is_partial_day": is_partial_day,
+            "price_vs_open_pct": _pct_change(quote.get("price"), quote.get("open")),
+            "price_from_high_pct": _pct_change(quote.get("price"), quote.get("high")),
+            "open_gap_pct": (metrics or {}).get("open_gap_pct"),
+            "low_gap_pct": (metrics or {}).get("low_gap_pct"),
+            "volume_ratio_5d": (metrics or {}).get("volume_ratio_5d"),
+            "volume_ratio_scope": "盘中部分量" if is_partial_day else "全天量",
+            "volume_vs_prev_day": round(current_volume / previous_volume, 2)
+            if current_volume is not None and previous_volume else None,
+            "turnover_pct": (
+                quote.get("turnover_pct")
+                if quote.get("turnover_pct") is not None
+                else (metrics or {}).get("last", {}).get("turnover_pct")
+            ),
+            "amount_yuan": (metrics or {}).get("last", {}).get("amount_yuan"),
+        },
+        "limitations": list(dict.fromkeys(limitations)),
+    }
 
 
 def load_limit_pool(path, data_date):
@@ -440,8 +697,11 @@ def mode_feedback(previous_rows, current_data):
     }
 
 
-def build_payload():
+def build_payload(stock_query=None):
     snapshot = datetime.now(CN_TZ)
+    stock = resolve_stock_query(stock_query) if stock_query else None
+    if stock and not is_mainboard_code(stock["code"]):
+        raise RuntimeError("错误：单股审视仅支持沪深主板：{}".format(stock["code"]))
     current = run_json("fetch_limit_up.py", "--current-only", "--json")
     data_date = "{}-{}-{}".format(
         current["base_date"][:4], current["base_date"][4:6], current["base_date"][6:])
@@ -523,12 +783,56 @@ def build_payload():
             warnings.append("日K或筹码未获取")
         row["warnings"] = warnings
 
+    stock_review = None
+    if stock:
+        code = stock["code"]
+        quote_payload = run_json("fetch_quote.py", code, "--days", "120", "--json")
+        target_metric = metrics.get(code)
+        if target_metric is None:
+            target_metrics = run_json(
+                "fetch_stock_metrics.py",
+                "--codes", code,
+                "--days", "120",
+                "--workers", "1",
+                "--json",
+            )
+            target_metric = next(
+                (row for row in target_metrics.get("rows", [])
+                 if row.get("code") == code),
+                None,
+            )
+        try:
+            structure = run_json(
+                "fetch_stock_structure.py", code, "--days", "120", "--json")
+        except Exception as exc:  # noqa: BLE001 单股筹码失败仍保留行情事实
+            structure = {
+                "holders": [],
+                "chips": None,
+                "concepts": [],
+                "limitations": ["筹码与题材未获取：{}".format(exc)],
+            }
+        stock_concepts = {code: structure.get("concepts") or []}
+        stock_review = build_stock_review(
+            snapshot=snapshot,
+            data_date=data_date,
+            query=stock["query"],
+            stock={"code": code, "name": stock.get("name") or structure.get("name")},
+            current=current,
+            previous_rows=previous_rows,
+            concepts=stock_concepts,
+            quote_payload=quote_payload,
+            metrics=target_metric or {},
+            structure=structure,
+        )
+        if structure.get("name"):
+            stock_review["name"] = structure["name"]
+
     quality_summary = collections.Counter(
         (row.get("metrics") or {}).get("quality") or "unavailable"
         for row in candidates
     )
     limitations = [
-        "本脚本只计算，不做题材取舍或可打板判断",
+        "本脚本只计算，不做题材取舍，不输出可打板或持有结论",
         "运行时只读取预先保存的昨日涨停池，不自动拉取、生成或覆盖涨停池文件",
         "题材来自当前 F10 精确概念，历史归属可能有变动",
         "筹码为日K+换手率推演值",
@@ -542,7 +846,10 @@ def build_payload():
     return {
         "generated_at": snapshot.isoformat(timespec="seconds"),
         "data_date": data_date,
-        "report_path": str(build_report_path(data_date)),
+        "report_path": str(
+            build_stock_report_path(data_date, stock["code"])
+            if stock else build_report_path(data_date)
+        ),
         "previous_date": previous_date,
         "quote_date": current.get("quote_date"),
         "board_permission": BOARD_PERMISSION,
@@ -561,6 +868,7 @@ def build_payload():
         "metric_quality_summary": dict(sorted(quality_summary.items())),
         "themes": themes,
         "candidates": candidates,
+        "stock_review": stock_review,
         "limitations": limitations,
     }
 
@@ -571,7 +879,13 @@ def build_compact_payload(payload, theme_limit=30):
         value = to_float(value)
         return None if value is None else round(value, digits)
 
+    review = payload.get("stock_review") or {}
     all_themes = payload.get("themes") or []
+    if review:
+        review_themes = set(review.get("themes") or [])
+        all_themes = [
+            row for row in all_themes if row.get("theme") in review_themes
+        ]
     themes = [
         {
             "theme": row.get("theme"),
@@ -585,7 +899,12 @@ def build_compact_payload(payload, theme_limit=30):
         for row in all_themes[:max(0, theme_limit)]
     ]
     candidates = []
-    for row in payload.get("candidates") or []:
+    source_candidates = payload.get("candidates") or []
+    if review:
+        source_candidates = [
+            row for row in source_candidates if row.get("code") == review.get("code")
+        ]
+    for row in source_candidates:
         metric = row.get("metrics") or {}
         returns = metric.get("returns_pct") or {}
         ma = metric.get("ma") or {}
@@ -641,6 +960,79 @@ def build_compact_payload(payload, theme_limit=30):
             "metric_limitations": metric.get("limitations") or [],
             "warnings": row.get("warnings") or [],
         })
+    compact_review = None
+    if review:
+        metric = review.get("metrics") or {}
+        returns = metric.get("returns_pct") or {}
+        ma = metric.get("ma") or {}
+        chips = review.get("structure", {}).get("chips") or metric.get("chips") or {}
+        quote = review.get("quote") or {}
+        intraday = review.get("intraday") or {}
+        compact_review = {
+            "query": review.get("query"),
+            "code": review.get("code"),
+            "name": review.get("name"),
+            "themes": review.get("themes") or [],
+            "quote_date": review.get("quote_date"),
+            "quote_consistent": review.get("quote_consistent"),
+            "current_limit_status": review.get("current_limit_status"),
+            "in_current_limit_pool": review.get("in_current_limit_pool"),
+            "current_board_count": review.get("current_board_count"),
+            "in_previous_limit_pool": review.get("in_previous_limit_pool"),
+            "previous_board_count": review.get("previous_board_count"),
+            "yesterday_performance": review.get("yesterday_performance"),
+            "quote": {
+                "price": number(quote.get("price")),
+                "prev_close": number(quote.get("prev_close")),
+                "open": number(quote.get("open")),
+                "high": number(quote.get("high")),
+                "low": number(quote.get("low")),
+                "change_pct": number(quote.get("change_pct")),
+                "volume_hands": number(quote.get("volume_hands")),
+            },
+            "intraday": {
+                "is_partial_day": intraday.get("is_partial_day"),
+                "price_vs_open_pct": number(intraday.get("price_vs_open_pct")),
+                "price_from_high_pct": number(intraday.get("price_from_high_pct")),
+                "open_gap_pct": number(intraday.get("open_gap_pct")),
+                "low_gap_pct": number(intraday.get("low_gap_pct")),
+                "volume_ratio_5d": number(intraday.get("volume_ratio_5d")),
+                "volume_ratio_scope": intraday.get("volume_ratio_scope"),
+                "volume_vs_prev_day": number(intraday.get("volume_vs_prev_day")),
+                "turnover_pct": number(intraday.get("turnover_pct")),
+                "amount_yuan": number(intraday.get("amount_yuan")),
+            },
+            "returns_pct": {
+                "5d": number(returns.get("5d")),
+                "10d": number(returns.get("10d")),
+                "20d": number(returns.get("20d")),
+            },
+            "ma": {
+                "5": number(ma.get("5"), 3),
+                "10": number(ma.get("10"), 3),
+                "20": number(ma.get("20"), 3),
+            },
+            "chips": {
+                "avg_cost": number(chips.get("avg_cost"), 3),
+                "peak_price": number(chips.get("peak_price"), 3),
+                "cost70_low": number(chips.get("cost70_low"), 3),
+                "cost70_high": number(chips.get("cost70_high"), 3),
+                "cost90_low": number(chips.get("cost90_low"), 3),
+                "cost90_high": number(chips.get("cost90_high"), 3),
+                "concentration70_pct": number(chips.get("concentration70_pct")),
+                "concentration90_pct": number(chips.get("concentration90_pct")),
+                "profit_ratio_pct": number(chips.get("profit_ratio_pct")),
+                "above_avg_pct": number(chips.get("above_avg_pct")),
+            } if chips else None,
+            "holders": review.get("structure", {}).get("holders") or [],
+            "metric_source": metric.get("source"),
+            "metric_quality": metric.get("quality"),
+            "limitations": review.get("limitations") or [],
+        }
+    metric_quality_summary = payload.get("metric_quality_summary")
+    if compact_review:
+        quality = compact_review.get("metric_quality")
+        metric_quality_summary = {quality: 1} if quality else {}
     previous_context = payload.get("previous_context") or {}
     compact_previous_context = {
         "count": previous_context.get("count"),
@@ -650,7 +1042,10 @@ def build_compact_payload(payload, theme_limit=30):
         "top_themes": (previous_context.get("themes") or [])[:10],
     }
     return {
-        "schema": "limit-hit.candidates.compact.v1",
+        "schema": (
+            "limit-hit.stock-review.compact.v1"
+            if compact_review else "limit-hit.candidates.compact.v1"
+        ),
         "generated_at": payload.get("generated_at"),
         "data_date": payload.get("data_date"),
         "quote_date": payload.get("quote_date"),
@@ -670,17 +1065,66 @@ def build_compact_payload(payload, theme_limit=30):
         "yesterday_open": payload.get("yesterday_open"),
         "yesterday_highest_board": payload.get("yesterday_highest_board"),
         "mode_feedback": payload.get("mode_feedback"),
-        "metric_quality_summary": payload.get("metric_quality_summary"),
+        "metric_quality_summary": metric_quality_summary,
         "theme_total_count": len(all_themes),
-        "themes_truncated": len(themes) < len(all_themes),
+        "themes_truncated": (
+            len(themes) < len(all_themes) if not compact_review else False
+        ),
         "themes": themes,
         "candidates": candidates,
+        "stock_review": compact_review,
         "limitations": payload.get("limitations") or [],
-        "note": "候选指标已扁平化和四舍五入；完整原始字段使用 --json",
+        "note": (
+            "单股事实已扁平化；报告结论由模型按 SKILL 口径判断"
+            if compact_review else
+            "候选指标已扁平化和四舍五入；完整原始字段使用 --json"
+        ),
     }
 
 
 def print_text(payload):
+    review = payload.get("stock_review")
+    if review:
+        quote = review.get("quote") or {}
+        intraday = review.get("intraday") or {}
+        metric = review.get("metrics") or {}
+        returns = metric.get("returns_pct") or {}
+        ma = metric.get("ma") or {}
+        chips = (review.get("structure") or {}).get("chips") or {}
+        print("=" * 100)
+        print("limit-hit 单股审视 · {}（{}） · 行情 {} · 快照 {}".format(
+            review.get("name"), review.get("code"),
+            review.get("quote_date") or "-", payload.get("generated_at") or "-"))
+        print("报告文件：{}".format(payload.get("report_path") or "-"))
+        print("行情日期一致：{}".format(
+            "是" if review.get("quote_consistent") else "否"))
+        print("当日状态：{} · 当前板数 {} · 昨日板数 {}".format(
+            review.get("current_limit_status"),
+            review.get("current_board_count") if review.get("current_board_count") is not None else "-",
+            review.get("previous_board_count") if review.get("previous_board_count") is not None else "-"))
+        print("现价 {} · 昨收 {} · 今开 {} · 最高 {} · 最低 {} · 涨跌幅 {}%".format(
+            quote.get("price"), quote.get("prev_close"), quote.get("open"),
+            quote.get("high"), quote.get("low"), quote.get("change_pct")))
+        print("量能：盘中部分量 {} · 相对昨量 {} · 5日量比 {}（{}） · 换手 {}%".format(
+            "是" if intraday.get("is_partial_day") else "否",
+            intraday.get("volume_vs_prev_day"), intraday.get("volume_ratio_5d"),
+            intraday.get("volume_ratio_scope"), intraday.get("turnover_pct")))
+        print("价格位置：相对开盘 {}% · 距最高 {}% · 开盘差 {}% · 最低差 {}%".format(
+            intraday.get("price_vs_open_pct"), intraday.get("price_from_high_pct"),
+            intraday.get("open_gap_pct"), intraday.get("low_gap_pct")))
+        print("趋势：5日 {}% / 10日 {}% / 20日 {}% · MA5 {} / MA10 {} / MA20 {}".format(
+            returns.get("5d"), returns.get("10d"), returns.get("20d"),
+            ma.get("5"), ma.get("10"), ma.get("20")))
+        print("筹码：获利盘 {}% · 平均成本 {} · 90%集中度 {}% · 高于均价 {}% · 质量 {}".format(
+            chips.get("profit_ratio_pct"), chips.get("avg_cost"),
+            chips.get("concentration90_pct"), chips.get("above_avg_pct"),
+            metric.get("quality") or "未获取"))
+        print("题材：{}".format("、".join(review.get("themes") or []) or "未获取"))
+        print("=" * 100)
+        for item in review.get("limitations") or []:
+            print("注：{}".format(item))
+        return
+
     print("=" * 112)
     print("limit-hit 候选上下文 · {} · 行情 {} · 快照 {}".format(
         payload["data_date"], payload.get("quote_date") or "-",
@@ -759,11 +1203,12 @@ def print_text(payload):
 
 def main():
     ap = argparse.ArgumentParser(description="limit-hit 候选上下文预计算")
+    ap.add_argument("--stock", help="单股名称或代码；输出持仓审视事实，不要求当日涨停")
     output = ap.add_mutually_exclusive_group()
     output.add_argument("--json", action="store_true", help="输出完整 JSON，供审计和调试")
     output.add_argument("--compact", action="store_true", help="输出模型友好的单行紧凑 JSON")
     args = ap.parse_args()
-    payload = build_payload()
+    payload = build_payload(stock_query=args.stock)
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     elif args.compact:

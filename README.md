@@ -2,7 +2,7 @@
 
 面向 A 股短线结构分析的自包含项目，提供 `limit-hit`、`leader-hit` 两个 Codex skill、运行期取数脚本和单元测试。
 
-- `limit-hit`：筛选一进二、二进三打板候选；
+- `limit-hit`：筛选一进二、二进三打板候选，也可按名称或代码审视单股是否继续持有；
 - `leader-hit`：筛选低位建仓完成、洗盘中、待启动或刚启动且尚未高位的沪深主板股票。
 
 项目不负责资金分配、仓位管理或账户下单。所有报告均不构成投资建议。
@@ -11,10 +11,10 @@
 
 ## 能力边界
 
-- 只处理当日已经涨停后的 `1→2`、`2→3`。
-- 三板及以上、跌停反核、未涨停埋伏不属于本项目。
+- 批量打板筛选只处理当日已经涨停后的 `1→2`、`2→3`；三板及以上、跌停反核、未涨停埋伏不进入批量候选。
+- 单股持仓审视只支持沪深主板，不要求当日涨停；可检查价格承接、量能、筹码、题材、消息和市场环境。
 - 默认最多保留 3 个题材，一个题材最多进入一只可打板候选。
-- 最终状态固定为“可打板 / 只观察 / 排除”。
+- 批量候选最终状态为“可打板 / 只观察 / 排除”；单股持仓结论为“继续持有 / 条件持有 / 不继续持有”。
 - 消息无法核验的股票不能进入“可打板”。
 
 ## 目录结构
@@ -55,6 +55,15 @@ cd <目标交易工作区>
 python D:\github\hit-it\limit-hit\scripts\save_limit_pool.py
 python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 ```
+
+指定股票名称或代码做持仓审视：
+
+```powershell
+python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --stock 002520 --compact
+python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --stock 日发精机 --json
+```
+
+单股报告写入 `report/个股审视/<data_date>_<code>.md`。盘中量能会标“盘中部分量”，不会把截至快照的成交量冒充全天量能。
 
 先执行保存脚本应在每个交易日收盘后完成；缺历史文件时可用 `--date YYYYMMDD` 指定日期。候选预计算运行时会拉取当日实时涨停池，但不会自行拉取、回补或生成昨日涨停池。
 
@@ -140,7 +149,7 @@ python D:\github\hit-it\leader-hit\scripts\backtest_leader_hit.py --start 202607
 | 脚本 | 用途 |
 |---|---|
 | `save_limit_pool.py` | 收盘后保存当日涨停池，支持 `--date YYYYMMDD` |
-| `prepare_candidates.py` | 预计算市场情绪、昨日反馈、题材梯队、候选日K、量能和筹码 |
+| `prepare_candidates.py` | 预计算批量候选上下文；`--stock` 审视指定个股的报价、量价、筹码和持有条件 |
 | `fetch_limit_up.py` | 当日及昨日涨停、跌停、炸板池和昨日涨停今日表现；`--current-only` 供 SKILL 使用 |
 | `fetch_limit_up_history.py` | 保存脚本按指定日期回补历史涨停成功池 |
 | `fetch_stock_structure.py` | 概念归属、股东户数、日K与筹码推演 |

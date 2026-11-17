@@ -2,7 +2,7 @@
 
 本目录维护两个独立技能：
 
-- `limit-hit`：生成可复核的一进二、二进三打板候选报告；
+- `limit-hit`：生成可复核的一进二、二进三打板候选报告，并审视指定个股是否继续持有；
 - `leader-hit`：筛选低位建仓、洗盘、待启动和刚启动的沪深主板股票。
 
 两个技能都只做候选分析，不执行资金、仓位或账户操作。
@@ -38,9 +38,9 @@ hit-it/
 
 ## 核心边界
 
-- 只处理当日 `board_count` 为 1 或 2 的股票。
+- 批量打板筛选只处理当日 `board_count` 为 1 或 2 的股票；单股持仓审视不要求当日涨停，但只支持沪深主板。
 - 默认最多 3 个题材，每题材最多一只可打板候选；用户可修改数量。
-- 最终状态只能是“可打板 / 只观察 / 排除”。
+- 批量候选最终状态只能是“可打板 / 只观察 / 排除”；单股持仓结论只能是“继续持有 / 条件持有 / 不继续持有”。
 - 消息无法核验时只能“只观察”。
 - 板块权限固定为沪深主板，不读取外部权限文件。
 - 不创建观察池或额外状态文件。
@@ -61,6 +61,13 @@ python D:\github\hit-it\limit-hit\scripts\save_limit_pool.py
 python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 ```
 
+指定股票名称或代码做持仓审视：
+
+```powershell
+python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --stock 002520 --compact
+python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --stock 日发精机 --compact
+```
+
 不要假设报告应写入代码项目根目录。`prepare_candidates.py` 中的 `report_path` 以当前工作目录为基准。
 
 ## 运行期硬规则
@@ -69,12 +76,17 @@ python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 
 - 当日涨停必须由 `limit-hit/scripts/fetch_limit_up.py --current-only --json` 现场获取，不能用旧报告冒充当日。
 - 先运行 `prepare_candidates.py --compact`，模型不得重复手工计算脚本已经给出的涨停数、晋级数、板数、题材聚合和候选指标；需要审计原始字段时改用 `--json`。
+- 单股审视先运行 `prepare_candidates.py --stock <名称或代码> --compact`；名称必须唯一精确匹配，不得猜股票。非沪深主板直接提示超出范围。
+- 单股不要求当日涨停，也不把不涨停判定为“排除”；必须同时检查价格承接、量能、筹码、题材扩散、消息和市场情绪。
+- 单股盘中量比和换手是截至快照的部分日数据，必须标“盘中部分量”；不得冒充全天量能。
+- 单股 `quote_date != data_date` 时停止给出“继续持有 / 条件持有 / 不继续持有”结论。
 - `--compact` 只列前 30 个题材；完整列表使用 `--json`，不得把截断列表误写成全量。
 - 结构代理回测使用 `backtest_limit_hit.py --start YYYYMMDD --end YYYYMMDD --capital 6000`，报告按 `references/backtest-report-template.md` 输出到 `report/回测/`；必须标注历史消息和分时扩散不可复现。
 - `data_date` 是行情实际日期，`generated_at` 是执行时间，两者不得混用。
 - `quote_date != data_date` 时，本轮接力反馈不是当日口径；标“数据未获取”，停止给出可打板结论。
 - 行情取数失败时 `quote_date` 必须为 `null`，不得回填 `data_date`。
 - 报告文件名使用 `data_date`，固定写入 `report/打板候选/<data_date>.md`，同一数据日重跑覆盖更新。
+- 单股持仓报告固定写入 `report/个股审视/<data_date>_<code>.md`，不得覆盖批量候选报告。
 - 昨日涨停池固定复用 `report/涨停池/<previous_date>.json`；文件不存在时停止运行并提示先执行保存脚本。
 - 运行时只拉取当日实时涨停池；不得自行拉取、回补、生成或覆盖昨日涨停池。已有文件不得覆盖。
 - 同花顺历史池的“几天几板”是窗口涨停次数，不是当前连板数；只有东财 `lbc`、天数等于板数的等价窗口或连续交易日池回算值可用于一进二、二进三。
@@ -117,7 +129,9 @@ python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 - 数字进入表格，趋势用箭头，状态使用固定标记。
 - `可打板名单`表头不得修改。
 - 报告必须保留“上游复用”“昨日涨停今日集体开盘”“次日 9:25 开盘退出复核”三节。
+- 单股报告同样保留上述三节，并增加价格承接、量能、筹码、题材、消息与硬风险维度。
 - “可打板”必须同时写执行触发和失效条件。
+- “继续持有”和“条件持有”都必须写保留条件与失效条件；没有明确失效条件不得给继续持有结论。
 - 盘中未收盘时，次日竞价分母标“待收盘确认”。
 - 最终对话必须提供手机可读摘要，包含数据日期、执行时间、市场情绪、可打板或只观察名单、报告路径。
 - 所有报告和最终回复必须写“不构成投资建议”。

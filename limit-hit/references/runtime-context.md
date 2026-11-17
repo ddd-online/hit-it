@@ -20,6 +20,13 @@ python limit-hit/scripts/save_limit_pool.py --date YYYYMMDD
 python limit-hit/scripts/prepare_candidates.py --compact
 ```
 
+单股持仓审视使用同一入口：
+
+```bash
+python limit-hit/scripts/prepare_candidates.py --stock 002520 --compact
+python limit-hit/scripts/prepare_candidates.py --stock 日发精机 --compact
+```
+
 保存脚本固定写入当前目录 `report/涨停池/YYYY-MM-DD.json`，已有文件不覆盖。`prepare_candidates.py` 只读取昨日文件，不拉取、回补、生成或覆盖涨停池。
 
 `--compact` 输出模型友好的单行 JSON，只保留决策字段；需要完整审计时使用 `--json`，去掉两者输出文本表。
@@ -43,6 +50,16 @@ python limit-hit/scripts/prepare_candidates.py --compact
 7. 输出数据限制、异常和“一字板/尾盘首封/开板过多/换手过热”等事实标签；
 8. 输出一进二、二进三分模式晋级/高开统计，以及当前最高板和 2 板及以上家数。
 
+单股模式在上述公共上下文之外额外完成：
+
+1. 把裸代码、交易所前缀/后缀或唯一股票名称解析为沪深主板代码；名称歧义时停止；
+2. 即使目标不在当日涨停池，也直接获取实时报价、日K、量能、均线、筹码和股东户数；
+3. 标记目标当日状态、当前/昨日板数、是否曾涨停或炸板；
+4. 计算现价相对开盘/最高价、相对昨日成交量、5 日量比和换手；
+5. 盘中明确标记 `volume_ratio_scope=盘中部分量`，收盘后才按全天量能。
+
+股票名称检索优先使用腾讯证券检索，失败或无结果时回退东方财富证券检索；两者都失败时停止，不使用模糊猜测。
+
 脚本不计算最终候选分，不决定题材强弱，不判断消息真假，不输出“可打板”。
 
 ## 模型负责的判断
@@ -54,6 +71,8 @@ python limit-hit/scripts/prepare_candidates.py --compact
 3. 只对每个题材的前 1–2 只候选搜索最新消息，并调用新闻、资金流报告；
 4. 根据洗盘、筹码、梯队、题材趋势和消息硬门槛，决定“可打板/只观察/排除”；
 5. 一个题材只保留一只，写入固定报告。
+
+单股模式下，模型只对目标股相关的 1–3 个精确题材补板块扩散，只对目标股补新闻和资金；随后按价格承接、量能、筹码、题材、消息和市场六类证据，给出“继续持有 / 条件持有 / 不继续持有”。不得把高开上涨等同于健康，也不得用盘中部分量充当全天量能。
 
 不要把脚本已经算好的字段再逐只手工计算，也不要让脚本决定买卖结论。
 
@@ -72,10 +91,13 @@ python limit-hit/scripts/prepare_candidates.py --compact
 - `mode_feedback`：昨日一进二、二进三的有效样本、停牌数、晋级率、高开率和平均开盘/收盘；
 - `themes`：题材聚合与板数结构；
 - `candidates`：所有当日 1/2 板候选及原始指标；
+- `stock_review`：单股模式目标、当日状态、报价、量价、筹码、股东户数和数据限制；批量模式为 `null`；
 - `minutes_since_first_seal`、`minutes_since_last_seal`、`is_reseal`：判断是否刚封、刚回封或封板已久；
 - `limitations`：口径限制。
 
 `--compact` 顶层保留 `schema`、行情日期、上游来源、市场情绪、分模式反馈、题材聚合、扁平化候选、指标质量摘要和限制；默认只列前 30 个题材并给出 `theme_total_count`、`themes_truncated`，完整题材列表使用 `--json`。候选不再嵌套完整 `metrics`，百分数保留 2 位。
+
+单股 `--compact` 的 `schema` 为 `limit-hit.stock-review.compact.v1`，只保留目标相关题材和目标候选（若目标当日属于 1/2 板候选）；`stock_review` 包含 `current_limit_status`、当前/昨日板数、`quote_consistent`、`intraday.is_partial_day`、`volume_ratio_scope`、`volume_vs_prev_day`、均线、收益和筹码。完整报价与原始指标使用 `--json`。
 
 板块权限固定为沪深主板：沪市 `600/601/603/605`，深市 `000/001/002/003`。创业板、科创板和北交所股票不会进入 `candidates` 或题材的 `candidate_codes`。停牌最高板同行业或共享精确概念的候选也不会进入 `candidates` 或 `candidate_codes`，但 `themes[].current_count` 和板数结构仍保留全市场涨停事实。
 

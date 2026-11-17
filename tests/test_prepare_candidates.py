@@ -1,9 +1,12 @@
 import importlib.util
+import io
 import json
 import os
 import pathlib
+import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime
 from unittest import mock
 
@@ -165,6 +168,270 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(path.parent.name, "打板候选")
         self.assertEqual(pool_path.name, "2026-11-11.json")
         self.assertEqual(pool_path.parent.name, "涨停池")
+
+    def test_stock_report_path_is_separate_from_batch_report(self):
+        path = MODULE.build_stock_report_path("2026-11-11", "sz002520")
+        self.assertEqual(path.name, "2026-11-11_sz002520.md")
+        self.assertEqual(path.parent.name, "个股审视")
+
+
+class StockReviewTest(unittest.TestCase):
+    def test_normalizes_bare_and_suffixed_stock_codes(self):
+        self.assertEqual(MODULE.normalize_stock_code("002520"), "sz002520")
+        self.assertEqual(MODULE.normalize_stock_code("600001"), "sh600001")
+        self.assertEqual(MODULE.normalize_stock_code("002520.SZ"), "sz002520")
+        self.assertEqual(MODULE.normalize_stock_code("sh600001"), "sh600001")
+
+    def test_resolves_exact_stock_name_without_guessing(self):
+        suggestions = [
+            {"code": "sz002520", "name": "日发精机"},
+            {"code": "sh600001", "name": "日发精工"},
+        ]
+        result = MODULE.resolve_stock_query(
+            "日发精机", suggestions_provider=lambda query: suggestions)
+        self.assertEqual(result["code"], "sz002520")
+        self.assertEqual(result["name"], "日发精机")
+
+    def test_parses_unicode_escaped_tencent_suggestion(self):
+        rows = MODULE.parse_stock_suggestions(
+            'v_hint="sz~000001~\\u5e73\\u5b89\\u94f6\\u884c~payh~GP-A"')
+        self.assertEqual(rows, [{"code": "sz000001", "name": "平安银行"}])
+
+    def test_parses_eastmoney_suggestion_fallback(self):
+        rows = MODULE.parse_eastmoney_suggestions(
+            '{"QuotationCodeTable":{"Data":['
+            '{"Code":"000001","Name":"平安银行"},'
+            '{"Code":"600001","Name":"邯郸钢铁"}]}}'
+        )
+        self.assertEqual(rows, [
+            {"code": "sz000001", "name": "平安银行"},
+            {"code": "sh600001", "name": "邯郸钢铁"},
+        ])
+
+    def test_rejects_ambiguous_stock_name(self):
+        suggestions = [
+            {"code": "sz002520", "name": "日发精机"},
+            {"code": "sh600001", "name": "日发精机"},
+        ]
+        with self.assertRaisesRegex(ValueError, "名称不唯一"):
+            MODULE.resolve_stock_query(
+                "日发精机", suggestions_provider=lambda query: suggestions)
+
+    def test_builds_non_limit_stock_review_facts(self):
+        snapshot = datetime(2026, 11, 17, 10, 30)
+        current = {
+            "quote_date": "20261117",
+            "zt_rows": [],
+            "zb_all_rows": [],
+            "dt_rows": [],
+            "yesterday_performance": {"rows": []},
+        }
+        quote_payload = {
+            "quote": {
+                "code": "sz002520",
+                "name": "日发精机",
+                "price": 21.0,
+                "prev_close": 20.0,
+                "open": 20.8,
+                "high": 21.2,
+                "low": 20.7,
+                "change_pct": 5.0,
+                "volume_hands": 600000,
+                "turnover_pct": 9.0,
+                "datetime": "20261117103000",
+            },
+            "kline": [
+                {"date": "2026-11-14", "volume": 400000},
+                {"date": "2026-11-17", "volume": 600000},
+            ],
+        }
+        metrics = {
+            "data_date": "2026-11-17",
+            "last": {"close": 21.0, "amount_yuan": 126000000},
+            "open_gap_pct": 4.0,
+            "low_gap_pct": 3.5,
+            "volume_ratio_5d": 1.5,
+            "chips": {"profit_ratio_pct": 72.0},
+            "quality": "exact",
+        }
+        review = MODULE.build_stock_review(
+            snapshot=snapshot,
+            data_date="2026-11-17",
+            query="日发精机",
+            stock={"code": "sz002520", "name": "日发精机"},
+            current=current,
+            previous_rows=[],
+            concepts={},
+            quote_payload=quote_payload,
+            metrics=metrics,
+            structure={"holders": [], "limitations": []},
+        )
+        self.assertFalse(review["in_current_limit_pool"])
+        self.assertEqual(review["current_limit_status"], "上涨")
+        self.assertTrue(review["intraday"]["is_partial_day"])
+        self.assertEqual(review["intraday"]["volume_vs_prev_day"], 1.5)
+        self.assertEqual(review["intraday"]["price_vs_open_pct"], 0.96)
+        self.assertEqual(review["quote_date"], "2026-11-17")
+        self.assertTrue(review["quote_consistent"])
+
+    def test_zero_quote_volume_is_not_replaced_by_metric_volume(self):
+        snapshot = datetime(2026, 11, 17, 10, 30)
+        quote_payload = {
+            "quote": {
+                "price": 20.0,
+                "prev_close": 20.0,
+                "open": 0,
+                "high": 0,
+                "low": 0,
+                "volume_hands": 0,
+                "turnover_pct": 0,
+                "datetime": "20261117103000",
+            },
+            "kline": [{"date": "2026-11-14", "volume": 400000}],
+        }
+        review = MODULE.build_stock_review(
+            snapshot=snapshot,
+            data_date="2026-11-17",
+            query="停牌测试",
+            stock={"code": "sh600001", "name": "停牌测试"},
+            current={"zt_rows": [], "zb_all_rows": [], "dt_rows": []},
+            previous_rows=[],
+            concepts={},
+            quote_payload=quote_payload,
+            metrics={"last": {"volume": 999999, "turnover_pct": 12.0}},
+            structure={},
+        )
+        self.assertEqual(review["current_limit_status"], "停牌")
+        self.assertEqual(review["intraday"]["volume_vs_prev_day"], 0.0)
+        self.assertEqual(review["intraday"]["turnover_pct"], 0)
+
+    def test_stale_quote_makes_holding_data_inconsistent(self):
+        snapshot = datetime(2026, 11, 17, 10, 30)
+        review = MODULE.build_stock_review(
+            snapshot=snapshot,
+            data_date="2026-11-17",
+            query="日发精机",
+            stock={"code": "sz002520", "name": "日发精机"},
+            current={"zt_rows": [], "zb_all_rows": [], "dt_rows": []},
+            previous_rows=[],
+            concepts={},
+            quote_payload={"quote": {
+                "price": 21.0,
+                "open": 20.8,
+                "high": 21.2,
+                "low": 20.7,
+                "volume_hands": 600000,
+                "change_pct": 5.0,
+                "datetime": "20261114150000",
+            }, "kline": []},
+            metrics={},
+            structure={},
+        )
+        self.assertEqual(review["quote_date"], "2026-11-14")
+        self.assertFalse(review["quote_consistent"])
+
+    def test_stock_mode_fetches_target_outside_limit_pool(self):
+        current = {
+            "base_date": "20261117",
+            "prev_date": "20261114",
+            "quote_date": "20261117",
+            "zt_rows": [],
+            "zb_all_rows": [],
+            "dt_rows": [],
+            "yesterday_performance": {"rows": []},
+            "overview": {},
+            "yesterday_open_close": {"overall": {}},
+        }
+        quote_payload = {
+            "quote": {
+                "code": "sz002520",
+                "name": "日发精机",
+                "price": 21.0,
+                "prev_close": 20.0,
+                "open": 20.8,
+                "high": 21.2,
+                "low": 20.7,
+                "change_pct": 5.0,
+                "volume_hands": 600000,
+                "turnover_pct": 9.0,
+                "datetime": "20261117103000",
+            },
+            "kline": [{"date": "2026-11-14", "volume": 400000}],
+        }
+        metrics_payload = {
+            "data_date": "2026-11-17",
+            "rows": [{
+                "code": "sz002520",
+                "data_date": "2026-11-17",
+                "last": {"close": 21.0, "volume": 600000},
+                "volume_ratio_5d": 1.5,
+                "chips": {"profit_ratio_pct": 72.0},
+                "quality": "exact",
+            }],
+        }
+        structure_payload = {
+            "code": "sz002520",
+            "name": "日发精机",
+            "holders": [],
+            "chips": {"profit_ratio_pct": 72.0},
+            "concepts": [
+                {"board_name": "机器人概念", "is_precise": True,
+                 "security_name": "日发精机"}
+            ],
+            "limitations": [],
+        }
+
+        def fake_run_json(script, *args):
+            if script == "fetch_limit_up.py":
+                return current
+            if script == "fetch_quote.py":
+                return quote_payload
+            if script == "fetch_stock_metrics.py":
+                return metrics_payload
+            if script == "fetch_stock_structure.py":
+                return structure_payload
+            raise AssertionError("unexpected script: {}".format(script))
+
+        old_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as temp:
+            os.chdir(temp)
+            try:
+                path = MODULE.build_limit_pool_path("2026-11-14")
+                path.parent.mkdir(parents=True)
+                path.write_text(json.dumps({
+                    "data_date": "2026-11-14",
+                    "stocks": [],
+                    "summary": {},
+                }), encoding="utf-8")
+                with mock.patch.object(MODULE, "run_json", side_effect=fake_run_json):
+                    payload = MODULE.build_payload(stock_query="002520")
+                review = payload["stock_review"]
+                self.assertFalse(review["in_current_limit_pool"])
+                self.assertEqual(review["themes"], ["机器人概念"])
+                self.assertEqual(
+                    pathlib.Path(payload["report_path"]).parent.name, "个股审视")
+                compact = MODULE.build_compact_payload(payload)
+                self.assertEqual(
+                    compact["schema"], "limit-hit.stock-review.compact.v1")
+                self.assertEqual(compact["stock_review"]["code"], "sz002520")
+                self.assertEqual(
+                    compact["metric_quality_summary"], {"exact": 1})
+            finally:
+                os.chdir(old_cwd)
+
+    def test_stock_cli_passes_name_query_to_builder(self):
+        with mock.patch.object(
+                MODULE, "build_payload", return_value={}) as build_payload, \
+                mock.patch.object(
+                    sys, "argv",
+                    ["prepare_candidates.py", "--stock", "日发精机", "--json"]), \
+                redirect_stdout(io.StringIO()):
+            MODULE.main()
+        build_payload.assert_called_once_with(stock_query="日发精机")
+
+    def test_stock_review_rejects_non_mainboard_code(self):
+        with self.assertRaisesRegex(RuntimeError, "仅支持沪深主板"):
+            MODULE.build_payload(stock_query="300001")
 
 
 class CompactPayloadTest(unittest.TestCase):
