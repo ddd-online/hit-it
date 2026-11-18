@@ -20,6 +20,7 @@ import fetch_sector_leaders as sector_leaders  # noqa: E402
 
 
 ALLOWED_TIMES = ("09:40", "10:00", "10:30", "11:00")
+TEMPLATE_PATH = BACKTEST_DIR / "sector-second-line-template.md"
 
 
 def parse_times(raw):
@@ -288,3 +289,131 @@ def run_group(signals, initial_capital, fees, signal_days=None):
         signal_days if signal_days is not None else len(trades),
     )
     return {"summary": summary, "trades": trades}
+
+
+def report_paths(workspace, start, end, times):
+    report_dir = workspace / "report" / "回测"
+    paths = {
+        time: report_dir / "板块第二梯队_{}_{}_{}.md".format(
+            time[:5].replace(":", "-"), start, end)
+        for time in times
+    }
+    paths["comparison"] = (
+        report_dir / "板块第二梯队_时点对比_{}_{}.md".format(start, end)
+    )
+    return paths
+
+
+def render_rules(result):
+    return "\n".join([
+        "- D 日涨停后买入，D+1 开盘退出。",
+        "- 打板组按 D 日涨停价成交，且执行时点后必须开板回封。",
+        "- 第二梯队组按 D 日开盘价成交，候选只使用 D-1 及以前结构和 D 日开盘。",
+        "- 两组各以 {} 元独立计算。".format(
+            backtest.money(result["capital"])),
+    ])
+
+
+def render_summary(group):
+    summary = group["summary"]
+    return "\n".join([
+        "| 指标 | 结果 |",
+        "|---|---:|",
+        "| 成交数 | {} |".format(summary["trade_count"]),
+        "| 方向胜率 | {} |".format(
+            backtest.rate(summary["direction_win_rate_pct"])),
+        "| 净收益胜率 | {} |".format(
+            backtest.rate(summary["net_win_rate_pct"])),
+        "| 期末本金 | {} 元 |".format(
+            backtest.money(summary["ending_capital"])),
+        "| 净收益率 | {} |".format(
+            backtest.pct(summary["net_return_pct"])),
+        "| 最大回撤 | {:.2f}% |".format(
+            summary["max_drawdown_pct"]),
+    ])
+
+
+def render_trades(trades):
+    lines = [
+        "| 信号日 | 退出日 | 题材 | 代码 | 名称 | 入场 | 退出 | 当日封板 | 次日溢价 | 净收益 | 期末本金 |",
+        "|---|---|---|---|---|---:|---:|---|---:|---:|---:|",
+    ]
+    for trade in trades:
+        lines.append(
+            "| {signal_date} | {exit_date} | {theme} | `{code}` | {name} | "
+            "{entry_price:.2f} | {exit_price:.2f} | {sealed} | {premium} | "
+            "{net_pnl:+.2f}元 | {capital_after:,.2f}元 |".format(
+                sealed="是" if trade.get("sealed_close") else "否",
+                premium=backtest.pct(
+                    trade.get("next_open_premium_pct")),
+                **trade,
+            )
+        )
+    if not trades:
+        lines.append("| - | - | - | - | 无成交 | - | - | - | - | - | - |")
+    return "\n".join(lines)
+
+
+def render_time_report(result):
+    text = TEMPLATE_PATH.read_text(encoding="utf-8")
+    replacements = {
+        "time": result["time"],
+        "period": "{} 至 {}".format(result["start"], result["end"]),
+        "initial_capital": backtest.money(result["capital"]),
+        "rules": render_rules(result),
+        "limit_summary": render_summary(result["groups"]["limit"]),
+        "limit_trades": render_trades(result["groups"]["limit"]["trades"]),
+        "second_line_summary": render_summary(
+            result["groups"]["second_line"]),
+        "second_line_trades": render_trades(
+            result["groups"]["second_line"]["trades"]),
+        "limitations": "\n".join(
+            "- " + item for item in result["limitations"]),
+    }
+    for key, value in replacements.items():
+        text = text.replace("{{%s}}" % key, value)
+    return text
+
+
+def render_comparison(results):
+    lines = [
+        "# 板块第二梯队时点对比",
+        "",
+        "| 时点 | 打板成交 | 打板期末 | 第二梯队成交 | 第二梯队期末 |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for result in results:
+        limit = result["groups"]["limit"]["summary"]
+        second = result["groups"]["second_line"]["summary"]
+        lines.append(
+            "| {} | {} | {} | {} | {} |".format(
+                result["time"],
+                limit["trade_count"],
+                backtest.money(limit["ending_capital"]),
+                second["trade_count"],
+                backtest.money(second["ending_capital"]),
+            )
+        )
+    lines.extend(["", "不构成投资建议"])
+    return "\n".join(lines)
+
+
+def build_arg_parser():
+    parser = argparse.ArgumentParser(description="板块第二梯队结构代理回测")
+    parser.add_argument("--start", required=True, help="开始日期 YYYYMMDD")
+    parser.add_argument("--end", required=True, help="结束日期 YYYYMMDD")
+    parser.add_argument("--capital", type=float, default=10000.0,
+                        help="每组初始本金，默认 10000")
+    parser.add_argument(
+        "--times",
+        type=parse_times,
+        default=("09:40:00", "10:00:00", "10:30:00", "11:00:00"),
+        help="执行时点，支持 09:40,10:00,10:30,11:00",
+    )
+    parser.add_argument("--workers", type=int, default=4,
+                        help="历史涨停池并发数，默认 4")
+    return parser
+
+
+if __name__ == "__main__":
+    build_arg_parser().parse_args()

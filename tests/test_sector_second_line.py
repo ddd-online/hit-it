@@ -1,5 +1,7 @@
 import importlib.util
 import pathlib
+import subprocess
+import sys
 import unittest
 
 
@@ -149,6 +151,90 @@ class SimulationTest(unittest.TestCase):
         )
         self.assertEqual(result["summary"]["trade_count"], 2)
         self.assertEqual(result["summary"]["ending_capital"], 10519.37)
+
+
+class ReportTest(unittest.TestCase):
+    def test_time_report_contains_both_groups_and_limits(self):
+        result = {
+            "time": "09:40:00",
+            "start": "20260101",
+            "end": "20261119",
+            "capital": 10000.0,
+            "groups": {
+                "limit": {
+                    "summary": {
+                        "ending_capital": 10000.0,
+                        "trade_count": 0,
+                        "direction_win_rate_pct": None,
+                        "net_win_rate_pct": None,
+                        "net_return_pct": 0.0,
+                        "max_drawdown_pct": 0.0,
+                    },
+                    "trades": [],
+                },
+                "second_line": {
+                    "summary": {
+                        "ending_capital": 10000.0,
+                        "trade_count": 0,
+                        "direction_win_rate_pct": None,
+                        "net_win_rate_pct": None,
+                        "net_return_pct": 0.0,
+                        "max_drawdown_pct": 0.0,
+                    },
+                    "trades": [],
+                },
+            },
+            "limitations": ["当前概念成分不是历史快照"],
+        }
+        text = MODULE.render_time_report(result)
+        self.assertIn("打板股组", text)
+        self.assertIn("第二梯队组", text)
+        self.assertIn("当前概念成分不是历史快照", text)
+        self.assertIn("不构成投资建议", text)
+
+    def test_comparison_has_all_supported_times(self):
+        results = [
+            {
+                "time": time,
+                "groups": {
+                    "limit": {"summary": {
+                        "ending_capital": 10000.0,
+                        "trade_count": 0,
+                    }},
+                    "second_line": {"summary": {
+                        "ending_capital": 10000.0,
+                        "trade_count": 0,
+                    }},
+                },
+            }
+            for time in ("09:40:00", "10:00:00", "10:30:00", "11:00:00")
+        ]
+        text = MODULE.render_comparison(results)
+        self.assertIn("| 09:40:00 |", text)
+        self.assertIn("| 11:00:00 |", text)
+        self.assertIn("不构成投资建议", text)
+
+    def test_report_paths_are_unique(self):
+        paths = MODULE.report_paths(
+            pathlib.Path("C:/work"),
+            "20260101",
+            "20261119",
+            ("09:40:00", "10:00:00", "10:30:00", "11:00:00"),
+        )
+        self.assertEqual(len(set(paths.values())), 5)
+        self.assertIn("09-40", str(paths["09:40:00"]))
+        self.assertIn("时点对比", str(paths["comparison"]))
+
+    def test_cli_exposes_backtest_arguments(self):
+        completed = subprocess.run(
+            [sys.executable, str(MODULE_PATH), "--help"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("--times", completed.stdout)
 
 
 if __name__ == "__main__":
