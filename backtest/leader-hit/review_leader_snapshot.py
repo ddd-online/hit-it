@@ -10,8 +10,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(SCRIPT_DIR))
+BACKTEST_DIR = Path(__file__).resolve().parent
+SKILL_SCRIPTS = BACKTEST_DIR.parents[1] / "leader-hit" / "scripts"
+sys.path.insert(0, str(BACKTEST_DIR))
+sys.path.insert(0, str(SKILL_SCRIPTS))
 
 import backtest_leader_hit as backtest  # noqa: E402
 import market_data  # noqa: E402

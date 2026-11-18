@@ -11,15 +11,19 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT_DIR = ROOT / "limit-hit" / "scripts"
 
 
-def load_module(name, filename):
-    spec = importlib.util.spec_from_file_location(name, SCRIPT_DIR / filename)
+def load_module(name, filename, directory=SCRIPT_DIR):
+    spec = importlib.util.spec_from_file_location(name, directory / filename)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
 HISTORY = load_module("limit_hit_history_quality", "fetch_limit_up_history.py")
-BACKTEST = load_module("limit_hit_backtest_quality", "backtest_limit_hit.py")
+BACKTEST = load_module(
+    "limit_hit_backtest_quality",
+    "backtest_limit_hit.py",
+    ROOT / "backtest" / "limit-hit",
+)
 LIMIT_UP = load_module("limit_hit_pool_quality", "fetch_limit_up.py")
 PREPARE = load_module("limit_hit_prepare_quality", "prepare_candidates.py")
 FLOW = load_module("limit_hit_flow_quality", "fetch_capital_flow.py")

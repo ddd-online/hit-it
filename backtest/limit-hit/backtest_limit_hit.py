@@ -12,23 +12,22 @@ import argparse
 import collections
 import json
 import math
-import os
 import statistics
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+BACKTEST_DIR = Path(__file__).resolve().parent
+SKILL_SCRIPTS = BACKTEST_DIR.parents[1] / "limit-hit" / "scripts"
+sys.path.insert(0, str(SKILL_SCRIPTS))
 
 import fallback_sources  # noqa: E402
 import fetch_limit_up_history  # noqa: E402
 import http_util  # noqa: E402
 import rule_profiles  # noqa: E402
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-SKILL_DIR = SCRIPT_DIR.parent
-TEMPLATE_PATH = SKILL_DIR / "references" / "backtest-report-template.md"
+TEMPLATE_PATH = BACKTEST_DIR / "backtest-report-template.md"
 TENCENT_RAW_KLINE = (
     "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
     "?param={code},day,,,{days},"
@@ -168,6 +167,35 @@ def candidate_eligible(row):
     if first_seal > "14:00:00" and (opens or 0) >= 5:
         return False
     return True
+
+
+def clock_arg(value):
+    try:
+        return datetime.strptime(value, "%H:%M").strftime("%H:%M:%S")
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("时间格式应为 HH:MM")
+
+
+def seal_visible(row, execution_time):
+    if not execution_time:
+        return True
+    first_seal = str(row.get("first_seal") or "")
+    if not first_seal or first_seal > execution_time:
+        return False
+    return True
+
+
+def entry_visible(row, execution_time, require_reseal_after):
+    if not seal_visible(row, execution_time):
+        return False
+    if not require_reseal_after:
+        return True
+    last_seal = str(row.get("last_seal") or "")
+    return bool(
+        (row.get("open_count") or 0) > 0
+        and last_seal
+        and last_seal > execution_time
+    )
 
 
 def can_simulate_entry(bar, one_word_executable):
@@ -430,18 +458,18 @@ def money(value):
 
 def render_report(result, trades, monthly, errors, args, profile_name, profile):
     trade_lines = [
-        "| 信号日 | 退出日 | 题材 | 代码 | 名称 | 板数 | 首封 | 开板 | 换手% | 入场 | 开盘退出 | 开盘幅度 | 净收益 | 期末本金 |",
-        "|---|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| 信号日 | 退出日 | 题材 | 代码 | 名称 | 板数 | 首封 | 回封 | 开板 | 换手% | 入场 | 开盘退出 | 开盘幅度 | 净收益 | 期末本金 |",
+        "|---|---|---|---|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for trade in trades:
         trade_lines.append(
             "| {signal_date} | {exit_date} | {theme} | `{code}` | {name} | "
-            "{board_count} | {first_seal} | {open_count} | {turnover_pct:.2f} | "
+            "{board_count} | {first_seal} | {last_seal} | {open_count} | {turnover_pct:.2f} | "
             "{entry_price:.2f} | {exit_price:.2f} | {gross_gap_pct:+.2f}% | "
             "{net_pnl:+.2f}元 | {capital_after:,.2f}元 |".format(**trade)
         )
     if not trades:
-        trade_lines.append("| - | - | - | - | 无成交 | - | - | - | - | - | - | - | - | - |")
+        trade_lines.append("| - | - | - | - | 无成交 | - | - | - | - | - | - | - | - | - | - |")
 
     monthly_lines = [
         "| 月份 | 成交 | 净胜 | 平均开盘幅度 | 净收益 |",
@@ -473,6 +501,24 @@ def render_report(result, trades, monthly, errors, args, profile_name, profile):
                 len(errors), sample)
         )
 
+    execution_time = getattr(args, "execution_time", None)
+    require_reseal_after = getattr(args, "require_reseal_after", False)
+    if execution_time and require_reseal_after:
+        execution_rule = (
+            "{} 前已首封；{} 后开板并重新封板，方计为可买".format(
+                execution_time, execution_time)
+        )
+        entry_rule = "执行后回封时，按 D 日涨停收盘价模拟买入"
+        missing_lines.append(
+            "- 历史池只有累计开板次数和最后回封时间，无法逐次还原开板、回封及真实排队成交。"
+        )
+    elif execution_time:
+        execution_rule = "{} 前已首封".format(execution_time)
+        entry_rule = "按 D 日涨停收盘价模拟买入"
+    else:
+        execution_rule = "不限制"
+        entry_rule = "信号日涨停收盘价买入"
+
     replacements = {
         "period": "{} 至 {}".format(args.start, args.end),
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -480,7 +526,8 @@ def render_report(result, trades, monthly, errors, args, profile_name, profile):
         "backtest_type": "结构代理回测",
         "trading_days": str(result["trading_days"]),
         "warmup_days": str(result["warmup_days"]),
-        "entry_rule": "信号日涨停收盘价买入",
+        "entry_rule": entry_rule,
+        "execution_rule": execution_rule,
         "exit_rule": "下一交易日开盘价卖出",
         "position_rule": "每个交易日最多一笔，单笔使用当时总权益的 {:.0%}，100 股整手，其余现金不计收益".format(
             args.position_fraction),
@@ -559,6 +606,10 @@ def run_backtest(args):
         rows = pools.get(day)
         if rows is None:
             continue
+        rows = [
+            row for row in rows
+            if seal_visible(row, getattr(args, "execution_time", None))
+        ]
         candidates = ranked_candidates(
             rows,
             previous_by_date.get(day, []),
@@ -577,6 +628,12 @@ def run_backtest(args):
         for item in candidates:
             row = item["row"]
             code = row["code"]
+            if not entry_visible(
+                    row,
+                    getattr(args, "execution_time", None),
+                    getattr(args, "require_reseal_after", False)):
+                trade_errors["执行后未开板回封"] += 1
+                continue
             if code not in bar_cache:
                 try:
                     bar_cache[code] = fetch_raw_kline(code)
@@ -613,6 +670,7 @@ def run_backtest(args):
                 "name": row.get("name"),
                 "board_count": row.get("board_count"),
                 "first_seal": row.get("first_seal") or "-",
+                "last_seal": row.get("last_seal") or "-",
                 "open_count": row.get("open_count") if row.get("open_count") is not None else "-",
                 "turnover_pct": to_float(row.get("turnover_pct")) or 0.0,
                 **simulated,
@@ -665,6 +723,10 @@ def main():
     ap.add_argument("--min-commission", type=float, default=5.0)
     ap.add_argument("--stamp-duty-rate", type=float, default=0.0005)
     ap.add_argument("--transfer-rate", type=float, default=0.00001)
+    ap.add_argument("--execution-time", type=clock_arg,
+                    help="盘中执行时点 HH:MM；只处理该时点前已首封的股票")
+    ap.add_argument("--require-reseal-after", action="store_true",
+                    help="执行时点后必须发生开板并回封，才计为可买")
     ap.add_argument("--report", help="报告路径")
     ap.add_argument("--json", action="store_true", help="输出完整 JSON")
     args = ap.parse_args()
@@ -672,6 +734,8 @@ def main():
         ap.error("--capital 必须大于 0")
     if not 0 < args.position_fraction <= 1:
         ap.error("--position-fraction 必须在 (0, 1] 区间")
+    if args.require_reseal_after and not args.execution_time:
+        ap.error("--require-reseal-after 必须同时指定 --execution-time")
     rule_profiles.load_rule_profile(args.profile)
 
     result = run_backtest(args)
@@ -685,6 +749,10 @@ def main():
         summary["trading_days"], summary["signal_days"], summary["trade_count"]))
     print("连板数回算预热：{} 个交易日".format(summary["warmup_days"]))
     print("单笔权益仓位：{:.0%}".format(args.position_fraction))
+    if args.execution_time:
+        print("执行时点：{}，执行后回封：{}".format(
+            args.execution_time,
+            "必需" if args.require_reseal_after else "不要求"))
     print("方向胜率：{}，净收益胜率：{}，赔率：{}".format(
         rate(summary["direction_win_rate_pct"]),
         rate(summary["net_win_rate_pct"]),

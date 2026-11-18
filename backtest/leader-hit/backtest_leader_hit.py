@@ -18,8 +18,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(SCRIPT_DIR))
+SKILL_SCRIPTS = Path(__file__).resolve().parents[2] / "leader-hit" / "scripts"
+sys.path.insert(0, str(SKILL_SCRIPTS))
 
 import market_data  # noqa: E402
 import prepare_leader_candidates as leader  # noqa: E402

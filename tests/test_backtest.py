@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 MODULE_PATH = (
     pathlib.Path(__file__).resolve().parents[1]
+    / "backtest"
     / "limit-hit"
-    / "scripts"
     / "backtest_limit_hit.py"
 )
 SPEC = importlib.util.spec_from_file_location("backtest_limit_hit", MODULE_PATH)
@@ -92,6 +92,50 @@ class CandidateFilterTest(unittest.TestCase):
         self.assertGreaterEqual(ranked[0]["candidate_score"], 60)
 
 
+class ExecutionWindowTest(unittest.TestCase):
+    def test_requires_prior_seal_and_later_reseal(self):
+        eligible = {
+            "first_seal": "09:31:00",
+            "last_seal": "10:15:00",
+            "open_count": 1,
+        }
+        sealed_after_checkpoint = {
+            "first_seal": "10:15:00",
+            "last_seal": "10:30:00",
+            "open_count": 1,
+        }
+        resealed_before_checkpoint = {
+            "first_seal": "09:31:00",
+            "last_seal": "09:50:00",
+            "open_count": 1,
+        }
+        never_opened = {
+            "first_seal": "09:31:00",
+            "last_seal": "14:50:00",
+            "open_count": 0,
+        }
+
+        self.assertTrue(MODULE.entry_visible(
+            eligible, "10:00:00", require_reseal_after=True))
+        self.assertFalse(MODULE.entry_visible(
+            sealed_after_checkpoint, "10:00:00", require_reseal_after=True))
+        self.assertFalse(MODULE.entry_visible(
+            resealed_before_checkpoint, "10:00:00", require_reseal_after=True))
+        self.assertFalse(MODULE.entry_visible(
+            never_opened, "10:00:00", require_reseal_after=True))
+
+    def test_theme_visibility_does_not_require_future_reseal(self):
+        never_opened = {
+            "first_seal": "09:31:00",
+            "last_seal": "14:50:00",
+            "open_count": 0,
+        }
+
+        self.assertTrue(MODULE.seal_visible(never_opened, "10:00:00"))
+        self.assertFalse(MODULE.entry_visible(
+            never_opened, "10:00:00", require_reseal_after=True))
+
+
 class OneWordSimulationTest(unittest.TestCase):
     def test_disabled_gate_blocks_one_word_entry(self):
         bar = {"open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0,
@@ -126,6 +170,8 @@ class BacktestReportTest(unittest.TestCase):
             min_theme_score=50,
             min_candidate_score=60,
             max_themes=3,
+            execution_time="10:00:00",
+            require_reseal_after=True,
         )
         result = {
             "trading_days": 1,
@@ -150,6 +196,7 @@ class BacktestReportTest(unittest.TestCase):
 
         self.assertIn("| 规则预设 | theme-first |", text)
         self.assertIn("一字板可排板；崩塌否决停用；偏弱门槛 85", text)
+        self.assertIn("10:00:00 前已首封；10:00:00 后开板并重新封板", text)
 
 
 if __name__ == "__main__":

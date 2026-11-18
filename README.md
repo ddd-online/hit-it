@@ -2,19 +2,20 @@
 
 面向 A 股短线结构分析的自包含项目，提供 `limit-hit`、`leader-hit` 两个 Codex skill、运行期取数脚本和单元测试。
 
-- `limit-hit`：筛选一进二、二进三打板候选，也可按名称或代码审视单股是否继续持有；
+- `limit-hit`：筛选一进二、二进三打板候选，研判强题材中的未涨停第二梯队，也可按名称或代码审视单股是否继续持有；
 - `leader-hit`：筛选低位建仓完成、洗盘中、待启动或刚启动且尚未高位的沪深主板股票。
 
 项目不负责资金分配、仓位管理或账户下单。所有报告均不构成投资建议。
 
-当前版本：1.5.0 · [查看发布记录](https://github.com/ddd-online/hit-it/releases)
+当前版本：1.6.0 · [查看发布记录](https://github.com/ddd-online/hit-it/releases)
 
 ## 能力边界
 
-- 批量打板筛选只处理当日已经涨停后的 `1→2`、`2→3`；三板及以上、跌停反核、未涨停埋伏不进入批量候选。
+- 打板名单只处理当日已经涨停后的 `1→2`、`2→3`；三板及以上、跌停反核不进入打板名单。
+- 第二梯队名单只从有涨停核心和扩散的同一精确题材中，选择执行时点仍未涨停且可成交的沪深主板成分股。
 - 单股持仓审视只支持沪深主板，不要求当日涨停；可检查价格承接、量能、筹码、题材、消息和市场环境。
 - 默认最多保留 3 个题材，一个题材最多进入一只可打板候选。
-- 批量候选最终状态为“可打板 / 只观察 / 排除”；单股持仓结论为“继续持有 / 条件持有 / 不继续持有”。
+- 打板名单状态为“可打板 / 只观察 / 排除”；第二梯队状态为“第二梯队候选 / 只观察 / 排除”；单股持仓结论为“继续持有 / 条件持有 / 不继续持有”。
 - 消息无法核验的股票不能进入“可打板”。
 
 ## 目录结构
@@ -32,10 +33,13 @@ hit-it/
 │   ├── agents/openai.yaml
 │   ├── references/
 │   └── scripts/
+├── backtest/
+│   ├── limit-hit/
+│   └── leader-hit/
 └── tests/
 ```
 
-`limit-hit/SKILL.md` 和 `leader-hit/SKILL.md` 分别是两个运行入口。各自的 `references/` 提供筛选细则和报告模板；两个技能均可独立安装，`leader-hit` 自带标准库行情与筹码推演代码。
+`limit-hit/SKILL.md` 和 `leader-hit/SKILL.md` 分别是两个运行入口。各自的 `references/` 只提供运行期筛选细则和报告模板；回测、历史样本复核及回测报告模板统一放在 `backtest/`，不随技能安装。
 
 ## 环境要求
 
@@ -108,13 +112,20 @@ python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 python D:\github\hit-it\limit-hit\scripts\fetch_sector_boards.py --type concept --search 机器人 人工智能 --top 20 --json
 ```
 
-4. 下钻板块成分股：
+4. 下钻板块成分股。第二梯队使用完整 JSON 通读全部成分股，不用涨幅榜顺序直接选股：
 
 ```powershell
-python D:\github\hit-it\limit-hit\scripts\fetch_sector_leaders.py --board BK1145 --top 300 --compact
+python D:\github\hit-it\limit-hit\scripts\fetch_sector_leaders.py --board BK1145 --top 300 --json
 ```
 
-5. 对少量候选补查消息、资金和股东结构：
+5. 对初筛股票批量补历史、均线和筹码；随后每只初筛股票默认交给一个独立子代理，完整执行单股评估。下面的单股命令由各子代理分别执行：
+
+```powershell
+python D:\github\hit-it\limit-hit\scripts\fetch_stock_metrics.py --codes sh600410,sz002491 --days 120 --workers 8 --json
+python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --stock sh600410 --json
+```
+
+6. 对少量候选补查消息、资金和股东结构：
 
 ```powershell
 python D:\github\hit-it\limit-hit\scripts\fetch_news.py sh600410 --news 10 --ann 10 --json
@@ -122,7 +133,7 @@ python D:\github\hit-it\limit-hit\scripts\fetch_capital_flow.py sh600410 --json
 python D:\github\hit-it\limit-hit\scripts\fetch_stock_structure.py sh600410 --json
 ```
 
-一条命令可同时定位多个题材，复用同一份板块扫描结果。`prepare_candidates.py` 负责可复现的数据装配和指标计算；题材取舍、消息核验、评分与最终状态由运行 SKILL 的模型完成。
+一条命令可同时定位多个题材，复用同一份板块扫描结果。`prepare_candidates.py` 和取数脚本负责可复现的数据装配；第二梯队每只初筛股票由独立子代理走完整单股审视流程，只回报单股证据和候选状态。父模型负责检查行情时点一致性、横向比较、题材选优和最终落盘。第二梯队不套用机械总分，结论依据执行时点量价、市场情绪、历史涨跌幅、筹码结构和基本面地雷综合判断。
 
 ## leader-hit 快速开始
 
@@ -148,9 +159,9 @@ python D:\github\hit-it\leader-hit\scripts\prepare_leader_candidates.py --codes 
 
 ```powershell
 python D:\github\hit-it\leader-hit\scripts\prepare_leader_candidates.py --date 20260928 --price-max 15 --compact
-python D:\github\hit-it\leader-hit\scripts\review_leader_snapshot.py --date 20260928 --price-max 15
-python D:\github\hit-it\leader-hit\scripts\backtest_leader_hit.py --start 20260101 --end 20260630
-python D:\github\hit-it\leader-hit\scripts\backtest_leader_hit.py --start 20260701 --end 20261113 --report-tag 测试集
+python D:\github\hit-it\backtest\leader-hit\review_leader_snapshot.py --date 20260928 --price-max 15
+python D:\github\hit-it\backtest\leader-hit\backtest_leader_hit.py --start 20260101 --end 20260630
+python D:\github\hit-it\backtest\leader-hit\backtest_leader_hit.py --start 20260701 --end 20261113 --report-tag 测试集
 ```
 
 输出固定状态为“建仓完成 / 洗盘中 / 待启动 / 启动初段 / 只观察 / 排除”。技术结构通过后，仍需核验精确概念、板块扩散、新闻和公告。
@@ -172,7 +183,7 @@ python D:\github\hit-it\leader-hit\scripts\backtest_leader_hit.py --start 202607
 
 规则 profile 固定从 `limit-hit/config/rules.yaml` 读取，默认是 `theme-first`；缺键或未知 profile 会直接报错。
 | `fetch_quote.py` | 腾讯个股行情快照与日K |
-| `backtest_limit_hit.py` | 2026 年以来的结构代理回测，默认本金 6000 元 |
+| `backtest/limit-hit/backtest_limit_hit.py` | 2026 年以来的结构代理回测，默认本金 6000 元 |
 | `fallback_sources.py` | 腾讯、新浪、东财 F10 等备用数据源 |
 | `http_util.py` | 强制直连的公共网络层 |
 | `leader-hit/scripts/prepare_leader_candidates.py` | 沪深主板低价股、日K、筹码、量能、箱体和左侧涨停结构初判 |

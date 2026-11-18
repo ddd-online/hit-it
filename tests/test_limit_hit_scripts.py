@@ -77,7 +77,6 @@ class SelfContainedScriptsTest(unittest.TestCase):
             "fetch_news.py",
             "fetch_capital_flow.py",
             "save_limit_pool.py",
-            "backtest_limit_hit.py",
         )
         for script in scripts:
             with self.subTest(script=script):

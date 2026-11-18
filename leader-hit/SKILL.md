@@ -64,26 +64,6 @@ python scripts/prepare_leader_candidates.py --price-max 20 --universe-only --com
 python scripts/prepare_leader_candidates.py --codes 600000,000001 --price-max 20 --compact
 ```
 
-历史指定股票必须同时给 `--date YYYYMMDD`；脚本只用该日及以前日 K，
-不得把当前现价带入历史判定。历史全市场快照也必须指定日期：
-
-```bash
-python scripts/prepare_leader_candidates.py --date 20260928 --price-max 15 --compact
-python scripts/backtest_leader_hit.py --start 20260101 --end 20260630
-```
-
-历史全市场快照会先取当前沪深主板代码表，再用目标日收盘价过滤；因此名称、
-上市存续和历史 ST 状态存在幸存者偏差，报告必须注明。
-
-指定历史快照的全样本事后回看：
-
-```bash
-python scripts/review_leader_snapshot.py --date 20260928 --price-max 15
-```
-
-回看会计入未入选股票，分别报告假阳性、严格信号漏选和股票池漏选，并按排除原因
-汇总；它只用于反馈优化，不得把未来走势回填到当日结论。
-
 脚本完成：主板与 ST 过滤、行情日期、日 K、均线、箱体、量能、左侧涨停、筹码推演、技术分和初判状态。模型不得重复计算这些字段；需要审计时用 `--json`。
 
 `--scan-limit` 默认从低价主板中选快照预排序前 120 只再拉历史行情：近期涨幅不极端、换手和成交额有效、主力净流入为正的优先。它仍可能漏掉排名外股票；需要完整覆盖时调大或设 0 扫描全部，并在报告注明扫描范围。`--compact` 只展示前 30 行，完整结果用 `--json`。
@@ -188,15 +168,4 @@ python scripts/review_leader_snapshot.py --date 20260928 --price-max 15
 
 筛选细则见 [references/selection-rules.md](references/selection-rules.md)，固定报告骨架见 [references/report-template.md](references/report-template.md)，视频规则证据见 [references/video-rules.md](references/video-rules.md)。
 
-## 回测与反馈优化
-
-回测固定写入当前工作区 `report/回测/低位主升_<start>_<end>.md`，口径见
-[references/backtest-report-template.md](references/backtest-report-template.md)。
-必须先把今年样本按时间切为训练集和测试集；只根据训练集漏判原因调整规则，
-规则冻结后才运行测试集。未来涨幅只用于构造标签和验收，不能进入技能特征。
-
-默认正样本为启动后 20 个交易日内收盘最大涨幅至少 30%、期末涨幅至少 15%、
-窗口内至少 2 次涨停。报告必须同时给出严格命中率、股票池命中率和漏判原因，
-并标明历史消息、板块扩散及真实换手率不可完整复现。
-
-不构成投资建议
+不构成投资建议。

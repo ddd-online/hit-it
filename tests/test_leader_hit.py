@@ -24,7 +24,7 @@ LEADER = load_module()
 
 
 def load_backtest_module():
-    path = ROOT / "leader-hit" / "scripts" / "backtest_leader_hit.py"
+    path = ROOT / "backtest" / "leader-hit" / "backtest_leader_hit.py"
     spec = importlib.util.spec_from_file_location("leader_hit_backtest", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -35,7 +35,7 @@ BACKTEST = load_backtest_module()
 
 
 def load_review_module():
-    path = ROOT / "leader-hit" / "scripts" / "review_leader_snapshot.py"
+    path = ROOT / "backtest" / "leader-hit" / "review_leader_snapshot.py"
     spec = importlib.util.spec_from_file_location("leader_hit_review", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

@@ -19,6 +19,7 @@
 | 规则开关 | {{profile_rules}} |
 | 筛选门槛 | {{selection_rule}} |
 | 开仓规则 | {{entry_rule}} |
+| 入场观察时点 | {{execution_rule}} |
 | 退出规则 | {{exit_rule}} |
 | 仓位规则 | {{position_rule}} |
 | 费用规则 | {{fee_rule}} |

@@ -1,4 +1,4 @@
 interface:
-  display_name: "涨停候选与持仓审视（limit-hit）"
-  short_description: "筛选一进二、二进三，并审视指定个股的量价、筹码与持有条件"
-  default_prompt: "使用 $limit-hit 筛选打板候选；也可输入股票名称或代码，审视是否继续持有"
+  display_name: "打板与板块第二梯队（limit-hit）"
+  short_description: "筛选一进二、二进三，研判未涨停第二梯队，并审视个股持有条件"
+  default_prompt: "使用 $limit-hit 筛选打板候选和强题材中的未涨停第二梯队；也可输入股票名称或代码审视是否继续持有"
