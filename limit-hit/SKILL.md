@@ -50,6 +50,14 @@ python D:\github\hit-it\limit-hit\scripts\save_limit_pool.py
 python limit-hit/scripts/prepare_candidates.py --compact
 ```
 
+默认使用 `theme-first`，即“结构分化、强梯队优先”口径：
+
+```bash
+python limit-hit/scripts/prepare_candidates.py --compact
+```
+
+`default` 当前与 `theme-first` 等价，可通过 `--profile` 显式指定；`--profile v1.4` 可复现旧口径。其他自定义 profile 仍从 `config/rules.yaml` 加载。
+
 保存脚本默认取最近已完成交易日，写入当前目录 `report/涨停池/<date>.json`；需要补某日时使用 `--date YYYYMMDD`。`prepare_candidates.py` 一次性完成当日实拉、昨日文件读取、概念聚合、梯队统计和候选指标计算，不自动生成涨停池。模型读取输出，不重复手工拉取或计算这些字段。具体边界见 [references/runtime-context.md](references/runtime-context.md)。
 
 数据日期、行情时间必须写进报告。接口回退日期不等于用户请求日期时，直接说明差异；不能把旧数据冒充当日。
@@ -93,6 +101,8 @@ python limit-hit/scripts/prepare_candidates.py --compact
 
 情绪处于退潮或高标集体负反馈时，降低推荐数量或直接输出“今日无可打板”；不得因为某个题材好看而绕过情绪门槛。具体门槛见选择细则。
 
+`market_gate.breadth_collapse` 只表示跌停家数宽度条件；默认 `collapse_veto=false`，它只作风险提示并降为偏弱；显式启用否决时才停止输出。`market_gate.leader_collapse` 是正常交易最高板天地板、跌停或行情缺失，任何 profile 都不能关闭。
+
 ### 4. 先做硬过滤，再深查
 
 候选必须同时满足：
@@ -100,11 +110,11 @@ python limit-hit/scripts/prepare_candidates.py --compact
 - 当日 `board_count` 为 1 或 2；板数未获取则排除；
 - 沪深主板、非 ST、非退市整理、非停牌；
 - 若昨日最高板停牌，排除与其同行业或共享至少一个精确概念的当日 1/2 板候选；`名称组:*` 不参与匹配；
-- 当日不是全天一字或无法成交的封死板；收后报告可将其列为“强度证明”，不能列为“可打板”；
+- 默认 `one_word_executable=true`，一字板只有在板上成交额大于 0、封单未撤且数据可核验时才进入候选；未启用该口径时，全天一字只列“强度证明”。一字板不获得洗盘加分，必须输出 `one_word=true`、`board_amount_yi`、`seal_fund_yi`、`seal_fund_ratio_pct`、`seal_fund_over_float_pct`、`fill_probability`；
 - 未出现财务造假立案、重大减持正在进行、退市风险、监管处罚、业绩暴雷等可核验负事件；
 - 最新题材催化与个股消息通过网页搜索核验，并在报告中给出标题、来源、发布时间、链接。
 
-脚本已先完成 1/2 板筛选、沪深主板权限过滤和停牌最高板同行业/精确概念过滤，再对剩余候选计算封板、量比、开盘/最低价差、历史涨跌、均线和筹码字段，并给出 `metric_quality`。两个排除数分别见 `board_permission_excluded_count` 与 `suspension_filter.excluded_count`，不得合并。`degraded` 表示换手率与筹码使用近似值，只能作为辅助证据，不能据此认定“筹码结构优秀”。模型筛出每个题材的 1–2 只后，只补取消息与资金：
+脚本已先完成 1/2 板筛选、沪深主板权限过滤、停牌最高板同行业/精确概念过滤和 profile 对应的一字板过滤，再对剩余候选计算封板、量比、开盘/最低价差、历史涨跌、均线和筹码字段，并给出 `metric_quality`。排除数分别见 `board_permission_excluded_count`、`suspension_filter.excluded_count` 与 `one_word_filter.excluded_count`，不得合并。`degraded` 表示换手率与筹码使用近似值，只能作为辅助证据，不能据此认定“筹码结构优秀”。模型筛出每个题材的 1–2 只后，只补取消息与资金：
 
 - `scripts/fetch_news.py <code> --news 10 --ann 10`：最新催化、澄清、减持、诉讼、处罚；
 - `scripts/fetch_capital_flow.py <code>`：主力资金；
@@ -126,6 +136,8 @@ A 股短线默认不把营收、净利、负债率、估值作为主要加减分
 
 按选择细则给题材强度和个股结构分。默认题材强度须 ≥80；一进二结构分须 ≥80，二进三须 ≥79；消息硬门槛必须同时通过。先按题材强度排序，再在题材内选分最高的一只；同一代码不得因多个概念重复出现。
 
+偏弱市场只保留 1 只。默认 `theme-first` 在候选所属题材强度 ≥80 时，把门槛改为一进二 ≥80、二进三 ≥79；题材 <80 仍按 85 分处理，数量上限始终为 1。
+
 最终状态只能是：
 
 - `可打板`：硬过滤通过、题材强度达标、消息可核验、候选分达到默认门槛；
@@ -143,6 +155,8 @@ A 股短线默认不把营收、净利、负债率、估值作为主要加减分
 按 [references/report-template.md](references/report-template.md) 的固定骨架写入报告。`可打板名单`表头不得改。
 
 报告必须保留「上游复用」「昨日涨停今日集体开盘」「次日 9:25 开盘退出复核」三节，并单列停牌最高板过滤审计，让报告能看出昨日涨停池文件用了什么、停牌与行情缺失如何区分、最高板硬规则是否通过、连带排除了哪些候选，以及次日竞价按什么分母复核。
+
+报告必须回显 `rule_profile.name`、`one_word_executable`、`collapse_veto` 和偏弱门槛实际取值。使用非默认 profile 时增加「用户口径覆盖」段，并写明不应用覆盖时的结果。
 
 所有数字进表格；趋势用箭头，状态用固定标记，不用表情符号。报告结尾必须写“不构成投资建议”。
 
@@ -165,6 +179,8 @@ A 股短线默认不把营收、净利、负债率、估值作为主要加减分
 ```bash
 python limit-hit/scripts/prepare_candidates.py --stock <名称或代码> --compact
 ```
+
+单股模式使用同一默认 `theme-first`；需要自定义时通过 `--profile` 指定。
 
 - 名称必须唯一精确匹配；找不到、重名或模糊命中多只时停止，要求用户提供代码，不猜股票。
 - 只支持沪深主板。创业板、科创板和北交所直接提示超出范围。
@@ -238,6 +254,8 @@ report/个股审视/<data_date>_<code>.md
 ```bash
 python limit-hit/scripts/backtest_limit_hit.py --start 20260101 --end YYYYMMDD --capital 6000
 ```
+
+默认使用 `theme-first` 的一字板可排板口径。历史涨停池没有完整日级跌停家数与昨日整体晋级反馈，`collapse_veto` 只能回显口径，不能用缺失历史数据伪造市场状态。
 
 回测报告固定写入 `report/回测/涨停打板_<start>_<end>.md`，并沿用
 [references/backtest-report-template.md](references/backtest-report-template.md)。历史消息、公告负事件、

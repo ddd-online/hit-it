@@ -15,6 +15,8 @@
 | 样本区间 | {{period}} |
 | 交易日 | {{trading_days}} |
 | 连板数回算预热 | {{warmup_days}} 个交易日 |
+| 规则预设 | {{profile_name}} |
+| 规则开关 | {{profile_rules}} |
 | 筛选门槛 | {{selection_rule}} |
 | 开仓规则 | {{entry_rule}} |
 | 退出规则 | {{exit_rule}} |

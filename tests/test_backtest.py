@@ -1,6 +1,7 @@
 import importlib.util
 import pathlib
 import unittest
+from types import SimpleNamespace
 
 
 MODULE_PATH = (
@@ -89,6 +90,66 @@ class CandidateFilterTest(unittest.TestCase):
         self.assertTrue(ranked)
         self.assertEqual(ranked[0]["theme"], "机器人")
         self.assertGreaterEqual(ranked[0]["candidate_score"], 60)
+
+
+class OneWordSimulationTest(unittest.TestCase):
+    def test_disabled_gate_blocks_one_word_entry(self):
+        bar = {"open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0,
+               "volume": 12000}
+
+        self.assertFalse(MODULE.can_simulate_entry(
+            bar, one_word_executable=False))
+
+    def test_theme_first_allows_one_word_only_with_board_volume(self):
+        zero_volume = {"open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0,
+                       "volume": 0}
+        traded = {"open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0,
+                  "volume": 12000}
+
+        self.assertFalse(MODULE.can_simulate_entry(
+            zero_volume, one_word_executable=True))
+        self.assertTrue(MODULE.can_simulate_entry(
+            traded, one_word_executable=True))
+
+
+class BacktestReportTest(unittest.TestCase):
+    def test_report_echoes_profile_and_rule_switches(self):
+        args = SimpleNamespace(
+            start="20261101",
+            end="20261118",
+            capital=6000.0,
+            position_fraction=1.0,
+            commission_rate=0.00025,
+            min_commission=5.0,
+            stamp_duty_rate=0.0005,
+            transfer_rate=0.00001,
+            min_theme_score=50,
+            min_candidate_score=60,
+            max_themes=3,
+        )
+        result = {
+            "trading_days": 1,
+            "warmup_days": 0,
+            "signal_days": 0,
+            "trade_count": 0,
+            "direction_win_rate_pct": None,
+            "net_win_rate_pct": None,
+            "odds": None,
+            "avg_open_pct": None,
+            "avg_high_open_pct": None,
+            "avg_low_open_pct": None,
+            "ending_capital": 6000.0,
+            "net_profit": 0.0,
+            "net_return_pct": 0.0,
+            "max_drawdown_pct": 0.0,
+        }
+        profile = MODULE.rule_profiles.load_rule_profile("theme-first")
+
+        text = MODULE.render_report(
+            result, [], [], [], args, "theme-first", profile)
+
+        self.assertIn("| 规则预设 | theme-first |", text)
+        self.assertIn("一字板可排板；崩塌否决停用；偏弱门槛 85", text)
 
 
 if __name__ == "__main__":

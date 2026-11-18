@@ -452,6 +452,20 @@ def one_word_check(rows, quotes):
     return marked
 
 
+def one_word_check_rows(rows):
+    """核验全部一/二板，并保留原高标梯队的前 15 只审计。"""
+    first_and_second = [
+        row for row in rows if row.get("board_count") in (1, 2)
+    ]
+    high_rows = sorted(
+        (row for row in rows if (row.get("board_count") or 1) >= 2),
+        key=lambda row: (-(row.get("board_count") or 0), row.get("first_seal") or ""),
+    )[:15]
+    return list({
+        row["code"]: row for row in first_and_second + high_rows
+    }.values())
+
+
 def open_class(gap_pct):
     """开盘分类：高开 / 平开 / 低开（开盘涨幅四舍五入到 0.01%）；无行情返回 '-'。"""
     if gap_pct is None:
@@ -1031,13 +1045,14 @@ def main():
         ]
         board_rows.sort(
             key=lambda r: (-(r["board_count"] or 0), r["first_seal"] or ""))
+        one_word_rows = one_word_check_rows(zt_rows)
         quote_codes = sorted(set(
-            [r["code"] for r in board_rows[:15]]
+            [r["code"] for r in one_word_rows]
             + [r["code"] for r in prev_zt_rows]
         ))
         quotes = fetch_quotes(quote_codes)
         quote_date = resolve_quote_date(quotes)
-        one_word = one_word_check(board_rows, quotes)
+        one_word = one_word_check(one_word_rows, quotes)
         payload = build_json_payload(
             base_str, prev_str, quote_date, status, notes,
             zt_rows, zb_rows, dt_rows, prev_zt_rows,
@@ -1083,10 +1098,11 @@ def main():
         default=None,
     )
 
-    # 高标梯队按板数降序、同板数按首封时间：文本表、JSON 与「一字」核验取同一批前 15 只
+    # 高标梯队按板数降序、同板数按首封时间；一字核验另覆盖全部一/二板。
     board_rows = [r for r in zt_rows if (r["board_count"] or 1) >= 2]
     board_rows.sort(key=lambda r: (-(r["board_count"] or 0), r["first_seal"] or ""))
-    one_word_codes = sorted(set(r["code"] for r in board_rows[:15]))
+    one_word_rows = one_word_check_rows(zt_rows)
+    one_word_codes = sorted(set(r["code"] for r in one_word_rows))
     quotes = fetch_quotes(one_word_codes)
     quote_date = resolve_quote_date(quotes)
 
@@ -1097,7 +1113,7 @@ def main():
             if q["quote_date"]:
                 quote_date = q["quote_date"]
 
-    one_word = one_word_check(board_rows, quotes)
+    one_word = one_word_check(one_word_rows, quotes)
 
     if not status["base_available"] and not zt_rows and not zb_rows and not dt_rows:
         notes.append("本次判定无效：基准日无任何涨停/跌停/炸板数据。")

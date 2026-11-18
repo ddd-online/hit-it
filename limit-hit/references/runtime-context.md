@@ -18,6 +18,7 @@ python limit-hit/scripts/save_limit_pool.py --date YYYYMMDD
 
 ```bash
 python limit-hit/scripts/prepare_candidates.py --compact
+python limit-hit/scripts/prepare_candidates.py --profile default --compact
 ```
 
 单股持仓审视使用同一入口：
@@ -41,14 +42,15 @@ python limit-hit/scripts/prepare_candidates.py --stock 日发精机 --compact
 2. 读取 `report/涨停池/<previous_date>.json`；文件不存在、损坏或日期不符时停止运行，并提示先运行保存脚本；
 3. 批量取精确概念，并按概念与“东方系/羊字辈”等名称组聚合；
 4. 计算每组今日涨停、昨日涨停、晋级数、最高板和板数结构；
-5. 先保留当日 1/2 板，再执行沪深主板权限过滤；若昨日最高板停牌，继续排除与其同行业或共享精确概念的候选。被这两步排除的股票不再请求个股指标；
+5. 先保留当日 1/2 板，再执行沪深主板权限过滤；若昨日最高板停牌，继续排除与其同行业或共享精确概念的候选；最后按 profile 处理一字板。默认 `theme-first` 只保留板上成交额大于 0 且封单可核验的一字板。被这些硬过滤排除的股票不再请求个股指标；
 6. 对剩余 1/2 板候选批量计算：
    - 首封/末封、开板次数、换手和封单占成交额；
    - 近 5/10/20 日涨幅、MA5/10/20；
    - 5 日量比、开盘差、最低价相对昨收差；
    - 获利盘、平均成本、90% 筹码集中度、筹码峰；
 7. 输出数据限制、异常和“一字板/尾盘首封/开板过多/换手过热”等事实标签；
-8. 输出一进二、二进三分模式晋级/高开统计，以及当前最高板和 2 板及以上家数。
+8. 输出一进二、二进三分模式晋级/高开统计，以及当前最高板和 2 板及以上家数；
+9. 读取 `config/rules.yaml`，输出 `rule_profile`、`market_gate` 和 `one_word_filter`，拆分宽度崩塌与高标崩塌。
 
 单股模式在上述公共上下文之外额外完成：
 
@@ -81,6 +83,9 @@ python limit-hit/scripts/prepare_candidates.py --stock 日发精机 --compact
 - `data_date`、`previous_date`、`quote_date`；
 - `board_permission`、`board_permission_excluded_count`：固定沪深主板权限及被排除的一/二板数量；
 - `suspension_filter`：停牌最高板、触发的行业/精确概念、连带排除数及逐股排除明细；
+- `rule_profile`：实际 profile 名称和三个规则开关；
+- `market_gate`：`breadth_collapse`、`leader_collapse`、`retreat`、情绪状态、动作和数量上限；
+- `one_word_filter`：一字板排除数和逐股原因；保留候选仍在 `candidates`；
 - `report_path`：由 `data_date` 生成的 `report/打板候选/YYYY-MM-DD.md`；
 - `previous_source`、`previous_pool_report`、`previous_pool_generated`（固定 `false`）、`previous_context`；
 - `current_pool_report`、`current_pool_generated`：固定为 `null`/`false`，运行时只处理实时快照，不落盘涨停池；
@@ -96,6 +101,8 @@ python limit-hit/scripts/prepare_candidates.py --stock 日发精机 --compact
 - `limitations`：口径限制。
 
 `--compact` 顶层保留 `schema`、行情日期、上游来源、市场情绪、分模式反馈、题材聚合、扁平化候选、指标质量摘要和限制；默认只列前 30 个题材并给出 `theme_total_count`、`themes_truncated`，完整题材列表使用 `--json`。候选不再嵌套完整 `metrics`，百分数保留 2 位。
+
+一字板候选额外输出 `one_word`、`board_amount_yi`、`seal_fund_yi`、`seal_fund_ratio_pct`、`seal_fund_over_float_pct` 和 `fill_probability`。`fill_probability` 的固定口径：板上成交额 ≥0.5 亿元且封单/成交额 ≤100% 为“高”；成交额 ≥0.2 亿元且封单/成交额 ≤200% 为“中”；板上成交额大于 0 的其他可执行情形为“低”。它只是排板辅助判断，不改变零成交、封单缺失/为零的硬过滤。
 
 单股 `--compact` 的 `schema` 为 `limit-hit.stock-review.compact.v1`，只保留目标相关题材和目标候选（若目标当日属于 1/2 板候选）；`stock_review` 包含 `current_limit_status`、当前/昨日板数、`quote_consistent`、`intraday.is_partial_day`、`volume_ratio_scope`、`volume_vs_prev_day`、均线、收益和筹码。完整报价与原始指标使用 `--json`。
 

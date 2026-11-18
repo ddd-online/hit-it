@@ -1,0 +1,36 @@
+version: 1
+
+default:
+  one_word_executable: true
+  collapse_veto: false
+  weak_market_gate:
+    max_picks: 1
+    min_score: 85
+    override:
+      enabled: true
+      theme_score_threshold: 80
+      min_score_by_mode:
+        one_to_two: 80
+        two_to_three: 79
+
+theme-first:
+  one_word_executable: true
+  collapse_veto: false
+  weak_market_gate:
+    max_picks: 1
+    min_score: 85
+    override:
+      enabled: true
+      theme_score_threshold: 80
+      min_score_by_mode:
+        one_to_two: 80
+        two_to_three: 79
+
+v1.4:
+  one_word_executable: false
+  collapse_veto: true
+  weak_market_gate:
+    max_picks: 1
+    min_score: 85
+    override:
+      enabled: false

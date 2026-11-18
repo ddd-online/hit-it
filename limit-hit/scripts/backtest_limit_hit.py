@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fallback_sources  # noqa: E402
 import fetch_limit_up_history  # noqa: E402
 import http_util  # noqa: E402
+import rule_profiles  # noqa: E402
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPT_DIR.parent
@@ -66,6 +67,7 @@ def fetch_raw_kline(code, days=400):
             "close": to_float(row[2]),
             "high": to_float(row[3]),
             "low": to_float(row[4]),
+            "volume": to_float(row[5]) if len(row) >= 6 else None,
         }
         for row in rows
         if len(row) >= 5
@@ -166,6 +168,13 @@ def candidate_eligible(row):
     if first_seal > "14:00:00" and (opens or 0) >= 5:
         return False
     return True
+
+
+def can_simulate_entry(bar, one_word_executable):
+    one_word = (
+        bar["open"] == bar["high"] == bar["low"] == bar["close"]
+    )
+    return not one_word or bool(one_word_executable and (bar.get("volume") or 0) > 0)
 
 
 def reason_tags(row):
@@ -419,7 +428,7 @@ def money(value):
     return "-" if value is None else "{:,.2f}".format(value)
 
 
-def render_report(result, trades, monthly, errors, args):
+def render_report(result, trades, monthly, errors, args, profile_name, profile):
     trade_lines = [
         "| 信号日 | 退出日 | 题材 | 代码 | 名称 | 板数 | 首封 | 开板 | 换手% | 入场 | 开盘退出 | 开盘幅度 | 净收益 | 期末本金 |",
         "|---|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|",
@@ -450,6 +459,7 @@ def render_report(result, trades, monthly, errors, args):
         "- 历史消息、公告负事件与公司基本面无法逐日完整复现，因此消息硬门槛未纳入。",
         "- 历史题材使用同花顺 `reason_tags` 代理，不代表当时东方财富精确概念。",
         "- 历史池的“几天几板”只作窗口统计；当前连板数由预热期内连续交易日池成员关系回算。",
+        "- 历史池缺少日级跌停家数与昨日整体晋级反馈，宽度崩塌和偏弱覆盖只回显 profile，不伪造市场状态。",
         "- 缺少历史盘中封板与板块成分扩散快照；入场按 D 日涨停收盘价模拟。",
         "- 每交易日最多一笔，单笔使用当时总权益的 {:.0%}，100 股整手；无法成交的高价股会跳过。".format(
             args.position_fraction),
@@ -477,6 +487,14 @@ def render_report(result, trades, monthly, errors, args):
         "fee_rule": "佣金 {:.4%}（最低 {:.0f} 元）+ 卖出印花税 {:.3%} + 双边过户费 {:.4%}".format(
             args.commission_rate, args.min_commission,
             args.stamp_duty_rate, args.transfer_rate),
+        "profile_name": profile_name,
+        "profile_rules": (
+            "一字板{}；崩塌否决{}；偏弱门槛 {}".format(
+                "可排板" if profile["one_word_executable"] else "不可执行",
+                "启用" if profile["collapse_veto"] else "停用",
+                profile["weak_market_gate"]["min_score"],
+            )
+        ),
         "selection_rule": "题材结构分≥{}/70，候选结构分≥{}/85；每个交易日最多考虑 {} 个题材。".format(
             args.min_theme_score, args.min_candidate_score, args.max_themes),
         "signal_days": str(result["signal_days"]),
@@ -505,6 +523,8 @@ def render_report(result, trades, monthly, errors, args):
 
 
 def run_backtest(args):
+    profile_name = getattr(args, "profile", "theme-first")
+    profile = rule_profiles.load_rule_profile(profile_name)
     start_date = parse_date(args.start)
     end_date = parse_date(args.end)
     dates, warmup_dates, _index_bars = get_trading_dates(start_date, end_date)
@@ -572,7 +592,8 @@ def run_backtest(args):
             if not entry_price or not exit_price:
                 trade_errors["价格缺失"] += 1
                 continue
-            if entry_bar["open"] == entry_bar["high"] == entry_bar["low"] == entry_bar["close"]:
+            if not can_simulate_entry(
+                    entry_bar, profile["one_word_executable"]):
                 trade_errors["一字板无法成交"] += 1
                 continue
             simulated = simulate_trade(
@@ -603,6 +624,7 @@ def run_backtest(args):
     summary["warmup_days"] = len(warmup_dates)
     summary["missing_pool_days"] = len(requested_errors)
     summary["skip_reasons"] = dict(trade_errors)
+    summary["rule_profile"] = {"name": profile_name, **profile}
     monthly = monthly_summary(trades)
     report_path = Path(args.report) if args.report else (
         Path.cwd() / "report" / "回测" /
@@ -610,7 +632,8 @@ def run_backtest(args):
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(
-        render_report(summary, trades, monthly, requested_errors, args),
+        render_report(
+            summary, trades, monthly, requested_errors, args, profile_name, profile),
         encoding="utf-8",
     )
     return {
@@ -628,6 +651,8 @@ def main():
     ap.add_argument("--end", default=datetime.now().astimezone().strftime("%Y%m%d"),
                     help="结束日期 YYYYMMDD")
     ap.add_argument("--capital", type=float, default=6000.0, help="初始本金，默认6000")
+    ap.add_argument("--profile", default="theme-first",
+                    help="规则预设，默认 theme-first")
     ap.add_argument("--position-fraction", type=float, default=1.0,
                     help="单笔使用的总权益比例，0-1，默认1（全仓）")
     ap.add_argument("--workers", type=int, default=4, help="历史涨停池并发数")
@@ -647,6 +672,7 @@ def main():
         ap.error("--capital 必须大于 0")
     if not 0 < args.position_fraction <= 1:
         ap.error("--position-fraction 必须在 (0, 1] 区间")
+    rule_profiles.load_rule_profile(args.profile)
 
     result = run_backtest(args)
     if args.json:

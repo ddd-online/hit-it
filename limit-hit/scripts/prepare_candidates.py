@@ -36,6 +36,7 @@ STOCK_CODE_RE = re.compile(
 sys.path.insert(0, str(SCRIPT_DIR))
 
 import http_util  # noqa: E402 与脚本同目录的直连网络层
+import rule_profiles  # noqa: E402
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -697,7 +698,8 @@ def mode_feedback(previous_rows, current_data):
     }
 
 
-def build_payload(stock_query=None):
+def build_payload(stock_query=None, profile="theme-first"):
+    rule_profile = rule_profiles.load_rule_profile(profile)
     snapshot = datetime.now(CN_TZ)
     stock = resolve_stock_query(stock_query) if stock_query else None
     if stock and not is_mainboard_code(stock["code"]):
@@ -742,12 +744,26 @@ def build_payload(stock_query=None):
     suspended_excluded_codes = {
         row["code"] for row in suspension["excluded"]
     }
-    candidates = [
+    permitted_after_suspension = [
         row for row in permitted_candidates
         if row["code"] not in suspended_excluded_codes
     ]
+    one_word_filter = rule_profiles.filter_one_word_candidates(
+        permitted_after_suspension,
+        current.get("one_word") or {},
+        rule_profile,
+    )
+    candidates = one_word_filter["candidates"]
+    one_word_audit = {
+        key: value for key, value in one_word_filter.items()
+        if key != "candidates"
+    }
+    one_word_excluded_codes = {
+        row["code"] for row in one_word_filter["excluded"]
+    }
+    excluded_codes = suspended_excluded_codes | one_word_excluded_codes
     themes = theme_summary(
-        current_rows, previous_rows, concepts, suspended_excluded_codes)
+        current_rows, previous_rows, concepts, excluded_codes)
     feedback = mode_feedback(previous_rows, current)
     metric_payload = run_json(
         "fetch_stock_metrics.py",
@@ -843,6 +859,25 @@ def build_payload(stock_query=None):
                 quality_summary["degraded"])
         )
 
+    performance = current.get("yesterday_performance") or {}
+    eligible_count = performance.get("eligible_count")
+    promotion_rate = (
+        round(performance["promote_count"] * 100.0 / eligible_count, 2)
+        if eligible_count and performance.get("promote_count") is not None
+        else None
+    )
+    market_gate = rule_profiles.evaluate_market_gate(
+        market=current.get("overview"),
+        promotion_rate_pct=promotion_rate,
+        yesterday_open=(current.get("yesterday_open_close") or {}).get("overall"),
+        yesterday_high=yesterday_high,
+        previous_max_board=(
+            current.get("prev_max_board")
+            or (previous_pool.get("summary") or {}).get("max_board")
+        ),
+        profile=rule_profile,
+    )
+
     return {
         "generated_at": snapshot.isoformat(timespec="seconds"),
         "data_date": data_date,
@@ -852,9 +887,12 @@ def build_payload(stock_query=None):
         ),
         "previous_date": previous_date,
         "quote_date": current.get("quote_date"),
+        "rule_profile": {"name": profile, **rule_profile},
+        "market_gate": market_gate,
         "board_permission": BOARD_PERMISSION,
         "board_permission_excluded_count": board_permission_excluded,
         "suspension_filter": suspension,
+        "one_word_filter": one_word_audit,
         "previous_source": previous_source,
         "previous_pool_report": str(previous_path),
         "previous_pool_generated": previous_generated,
@@ -926,6 +964,11 @@ def build_compact_payload(payload, theme_limit=30):
             "break_count": row.get("break_count"),
             "seal_fund_yi": number(row.get("seal_fund_yi")),
             "seal_fund_ratio_pct": number(row.get("seal_fund_ratio_pct")),
+            "one_word": row.get("one_word"),
+            "board_amount_yi": number(row.get("board_amount_yi")),
+            "seal_fund_over_float_pct": number(
+                row.get("seal_fund_over_float_pct")),
+            "fill_probability": row.get("fill_probability"),
             "minutes_since_first_seal": row.get("minutes_since_first_seal"),
             "minutes_since_last_seal": row.get("minutes_since_last_seal"),
             "is_reseal": row.get("is_reseal"),
@@ -942,7 +985,6 @@ def build_compact_payload(payload, theme_limit=30):
             "open_gap_pct": number(metric.get("open_gap_pct")),
             "low_gap_pct": number(metric.get("low_gap_pct")),
             "volume_ratio_5d": number(metric.get("volume_ratio_5d")),
-            "one_word": metric.get("one_word"),
             "chips": {
                 "avg_cost": number(chips.get("avg_cost"), 3),
                 "peak_price": number(chips.get("peak_price"), 3),
@@ -1049,11 +1091,14 @@ def build_compact_payload(payload, theme_limit=30):
         "generated_at": payload.get("generated_at"),
         "data_date": payload.get("data_date"),
         "quote_date": payload.get("quote_date"),
+        "rule_profile": payload.get("rule_profile"),
+        "market_gate": payload.get("market_gate"),
         "previous_date": payload.get("previous_date"),
         "board_permission": payload.get("board_permission"),
         "board_permission_excluded_count": payload.get(
             "board_permission_excluded_count"),
         "suspension_filter": payload.get("suspension_filter"),
+        "one_word_filter": payload.get("one_word_filter"),
         "report_path": payload.get("report_path"),
         "previous_source": payload.get("previous_source"),
         "previous_pool_report": payload.get("previous_pool_report"),
@@ -1133,6 +1178,14 @@ def print_text(payload):
     print("板块权限：{}（权限外 1/2 板排除 {} 只）".format(
         payload.get("board_permission"),
         payload.get("board_permission_excluded_count")))
+    rule_profile = payload.get("rule_profile") or {}
+    gate = payload.get("market_gate") or {}
+    print("口径：{} · 市场门槛 {} / {} · 最多 {} 只".format(
+        rule_profile.get("name"), gate.get("state"), gate.get("action"),
+        "-" if gate.get("max_picks") is None else gate.get("max_picks")))
+    one_word_filter = payload.get("one_word_filter") or {}
+    print("一字板过滤：排除 {} 只".format(
+        one_word_filter.get("excluded_count", 0)))
     suspension = payload.get("suspension_filter") or {}
     print("停牌最高板：{}（同行业/精确概念排除 {} 只）".format(
         "、".join(
@@ -1204,11 +1257,13 @@ def print_text(payload):
 def main():
     ap = argparse.ArgumentParser(description="limit-hit 候选上下文预计算")
     ap.add_argument("--stock", help="单股名称或代码；输出持仓审视事实，不要求当日涨停")
+    ap.add_argument("--profile", default="theme-first",
+                    help="规则预设，默认 theme-first")
     output = ap.add_mutually_exclusive_group()
     output.add_argument("--json", action="store_true", help="输出完整 JSON，供审计和调试")
     output.add_argument("--compact", action="store_true", help="输出模型友好的单行紧凑 JSON")
     args = ap.parse_args()
-    payload = build_payload(stock_query=args.stock)
+    payload = build_payload(stock_query=args.stock, profile=args.profile)
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     elif args.compact:

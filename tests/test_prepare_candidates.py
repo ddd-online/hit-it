@@ -427,7 +427,20 @@ class StockReviewTest(unittest.TestCase):
                     ["prepare_candidates.py", "--stock", "日发精机", "--json"]), \
                 redirect_stdout(io.StringIO()):
             MODULE.main()
-        build_payload.assert_called_once_with(stock_query="日发精机")
+        build_payload.assert_called_once_with(
+            stock_query="日发精机", profile="theme-first")
+
+    def test_profile_cli_passes_profile_to_builder(self):
+        with mock.patch.object(
+                MODULE, "build_payload", return_value={}) as build_payload, \
+                mock.patch.object(
+                    sys, "argv",
+                    ["prepare_candidates.py", "--profile", "theme-first",
+                     "--json"]), \
+                redirect_stdout(io.StringIO()):
+            MODULE.main()
+        build_payload.assert_called_once_with(
+            stock_query=None, profile="theme-first")
 
     def test_stock_review_rejects_non_mainboard_code(self):
         with self.assertRaisesRegex(RuntimeError, "仅支持沪深主板"):
@@ -466,6 +479,87 @@ class CompactPayloadTest(unittest.TestCase):
         self.assertEqual(candidate["ma"]["5"], 10.123)
         self.assertEqual(candidate["chips"]["profit_ratio_pct"], 88.89)
         self.assertNotIn("metrics", candidate)
+
+    def test_compact_payload_exposes_rule_profile_and_market_gate(self):
+        payload = {
+            "rule_profile": {"name": "theme-first"},
+            "market_gate": {"state": "偏弱", "action": "max_one"},
+            "themes": [],
+            "candidates": [],
+        }
+
+        compact = MODULE.build_compact_payload(payload)
+
+        self.assertEqual(compact["rule_profile"]["name"], "theme-first")
+        self.assertEqual(compact["market_gate"]["action"], "max_one")
+
+
+class ProfilePipelineTest(unittest.TestCase):
+    def test_one_word_filter_changes_candidates_and_theme_codes(self):
+        current = {
+            "base_date": "20261118",
+            "prev_date": "20261117",
+            "quote_date": "20261118",
+            "overview": {
+                "zt_count": 32,
+                "dt_count": 21,
+                "zb_count": 19,
+                "seal_rate_pct": 62.7,
+                "max_board": 4,
+            },
+            "one_word": {"sh600001": True},
+            "zt_rows": [
+                {"code": "sh600001", "name": "一字候选", "board_count": 1,
+                 "amount_yi": 0.34, "seal_fund_yi": 1.29,
+                 "float_cap_yi": 10.0, "themes": ["机器人"]},
+                {"code": "sh600002", "name": "普通候选", "board_count": 1,
+                 "amount_yi": 2.0, "seal_fund_yi": 0.4,
+                 "float_cap_yi": 20.0, "themes": ["机器人"]},
+            ],
+            "yesterday_performance": {"rows": []},
+        }
+
+        def fake_run_json(script, *args):
+            if script == "fetch_limit_up.py":
+                return current
+            if script == "fetch_stock_metrics.py":
+                return {"rows": []}
+            raise AssertionError(script)
+
+        old_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as temp:
+            os.chdir(temp)
+            try:
+                path = MODULE.build_limit_pool_path("2026-11-17")
+                path.parent.mkdir(parents=True)
+                path.write_text(json.dumps({
+                    "data_date": "2026-11-17",
+                    "summary": {},
+                    "stocks": [],
+                }), encoding="utf-8")
+                with mock.patch.object(
+                        MODULE, "run_json", side_effect=fake_run_json):
+                    default = MODULE.build_payload()
+                    theme_first = MODULE.build_payload(profile="theme-first")
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertEqual(
+            [row["code"] for row in default["candidates"]],
+            ["sh600001", "sh600002"],
+        )
+        self.assertEqual(
+            [row["code"] for row in theme_first["candidates"]],
+            ["sh600001", "sh600002"],
+        )
+        self.assertTrue(theme_first["candidates"][0]["one_word"])
+        self.assertEqual(
+            default["themes"][0]["candidate_codes"],
+            ["sh600001", "sh600002"],
+        )
+        self.assertEqual(default["market_gate"]["action"], "max_one")
+        self.assertEqual(theme_first["market_gate"]["action"], "max_one")
+        self.assertNotIn("candidates", default["one_word_filter"])
 
 
 if __name__ == "__main__":

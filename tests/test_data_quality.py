@@ -336,6 +336,20 @@ class MetricQualityTest(unittest.TestCase):
 
 
 class PoolFetchPerformanceTest(unittest.TestCase):
+    def test_one_word_check_rows_include_first_and_second_boards(self):
+        rows = [
+            {"code": "sh600001", "board_count": 1, "first_seal": "09:31:00"},
+            {"code": "sh600002", "board_count": 2, "first_seal": "09:30:00"},
+            {"code": "sh600003", "board_count": 3, "first_seal": "09:32:00"},
+        ]
+
+        selected = LIMIT_UP.one_word_check_rows(rows)
+
+        self.assertEqual(
+            [row["code"] for row in selected],
+            ["sh600001", "sh600002", "sh600003"],
+        )
+
     def test_related_pools_are_fetched_once_without_base_dates(self):
         def fake_fetch(kind, date):
             return {"kind": kind, "date": date}
