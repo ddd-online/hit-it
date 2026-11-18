@@ -12,8 +12,11 @@ from pathlib import Path
 BACKTEST_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BACKTEST_DIR.parents[1]
 sys.path.insert(0, str(BACKTEST_DIR))
+sys.path.insert(0, str(REPO_ROOT / "limit-hit" / "scripts"))
 
 import backtest_limit_hit as backtest  # noqa: E402
+import fallback_sources  # noqa: E402
+import fetch_sector_leaders as sector_leaders  # noqa: E402
 
 
 ALLOWED_TIMES = ("09:40", "10:00", "10:30", "11:00")
@@ -82,3 +85,60 @@ def theme_ladder(current_rows, previous_rows, min_score, max_themes):
         )
     )
     return themes[:max_themes]
+
+
+def build_board_index(rows):
+    return {
+        str(row.get("name") or "").strip(): row["code"]
+        for row in rows
+        if str(row.get("name") or "").strip() and row.get("code")
+    }
+
+
+def normalize_members(raw_members):
+    rows = []
+    seen = set()
+    for item in raw_members:
+        raw_code = str(
+            item.get("code") or item.get("SECURITY_CODE") or "")
+        code = (
+            raw_code
+            if raw_code.startswith(("sh", "sz", "bj"))
+            else fallback_sources.infer_sec_code(raw_code)
+        )
+        name = str(
+            item.get("name")
+            or item.get("SECURITY_NAME_ABBR")
+            or item.get("SECURITY_NAME")
+            or ""
+        )
+        if not code or code in seen:
+            continue
+        if not backtest.is_mainboard(code) or backtest.is_st(name):
+            continue
+        seen.add(code)
+        rows.append({
+            "code": code,
+            "name": name,
+            "float_cap_yi": item.get("float_cap_yi"),
+        })
+    return rows
+
+
+def member_rows(bk_code, fetch_members=None):
+    fetch_members = (
+        fetch_members or sector_leaders.fetch_f10_members_quotes)
+    _board_name, raw_members = fetch_members(bk_code)
+    return normalize_members(raw_members)
+
+
+def dedupe_candidates(candidates):
+    best = {}
+    for row in candidates:
+        current = best.get(row["code"])
+        if current is None or row["theme_score"] > current["theme_score"]:
+            best[row["code"]] = row
+    return sorted(
+        best.values(),
+        key=lambda row: (-row["theme_score"], row["code"]),
+    )

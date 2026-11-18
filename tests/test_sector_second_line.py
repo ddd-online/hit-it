@@ -45,5 +45,33 @@ class TimeAndThemeTest(unittest.TestCase):
         self.assertEqual(themes[0]["promoted_count"], 1)
 
 
+class MembershipTest(unittest.TestCase):
+    def test_board_index_uses_exact_name_only(self):
+        index = MODULE.build_board_index([
+            {"name": "机器人概念", "code": "BK1001"},
+            {"name": "机器人", "code": "BK1002"},
+        ])
+        self.assertEqual(index["机器人"], "BK1002")
+        self.assertNotIn("机器人设备", index)
+
+    def test_member_rows_filter_mainboard_and_parse_codes(self):
+        raw = [
+            {"SECURITY_CODE": "600001", "SECURITY_NAME_ABBR": "甲"},
+            {"SECURITY_CODE": "300001", "SECURITY_NAME_ABBR": "乙"},
+            {"SECURITY_CODE": "000002", "SECURITY_NAME_ABBR": "丙"},
+        ]
+        rows = MODULE.normalize_members(raw)
+        self.assertEqual([row["code"] for row in rows], ["sh600001", "sz000002"])
+
+    def test_cross_theme_dedupe_keeps_stronger_theme(self):
+        rows = [
+            {"code": "sh600001", "theme": "弱题材", "theme_score": 50},
+            {"code": "sh600001", "theme": "强题材", "theme_score": 80},
+        ]
+        deduped = MODULE.dedupe_candidates(rows)
+        self.assertEqual(len(deduped), 1)
+        self.assertEqual(deduped[0]["theme"], "强题材")
+
+
 if __name__ == "__main__":
     unittest.main()
