@@ -90,6 +90,37 @@ def make_bars():
     return bars
 
 
+def make_trade_bars(open_price, close_price, next_open):
+    bars = []
+    for index in range(24):
+        close = 10.0 + index * 0.01
+        bars.append({
+            "date": "2026-01-{:02d}".format(index + 1),
+            "open": close - 0.03,
+            "high": close + 0.08,
+            "low": close - 0.08,
+            "close": close,
+            "volume_hands": 1000.0,
+        })
+    bars.append({
+        "date": "2026-01-25",
+        "open": open_price,
+        "high": max(open_price, close_price) + 0.05,
+        "low": min(open_price, close_price) - 0.05,
+        "close": close_price,
+        "volume_hands": 1200.0,
+    })
+    bars.append({
+        "date": "2026-01-26",
+        "open": next_open,
+        "high": next_open + 0.05,
+        "low": next_open - 0.05,
+        "close": next_open,
+        "volume_hands": 900.0,
+    })
+    return bars
+
+
 class FeatureTest(unittest.TestCase):
     def test_features_use_previous_day_structure(self):
         bars = make_bars()
@@ -152,6 +183,40 @@ class SimulationTest(unittest.TestCase):
         self.assertEqual(result["summary"]["trade_count"], 2)
         self.assertEqual(result["summary"]["ending_capital"], 10519.37)
 
+    def test_group_summary_reports_seal_and_premium_rates(self):
+        signals = [
+            {
+                "date": "2026-01-05",
+                "entry_price": 10.0,
+                "exit_price": 11.0,
+                "theme": "机器人",
+                "outcome": {
+                    "sealed_close": True,
+                    "next_open_premium_pct": 2.0,
+                },
+            },
+            {
+                "date": "2026-01-06",
+                "entry_price": 10.0,
+                "exit_price": 9.8,
+                "theme": "机器人",
+                "outcome": {
+                    "sealed_close": False,
+                    "next_open_premium_pct": -1.0,
+                },
+            },
+        ]
+        result = MODULE.run_group(
+            signals,
+            10000.0,
+            {"commission_rate": 0.00025, "min_commission": 5.0,
+             "stamp_duty_rate": 0.0005, "transfer_rate": 0.00001},
+        )
+        summary = result["summary"]
+        self.assertEqual(summary["seal_rate_pct"], 50.0)
+        self.assertEqual(summary["positive_next_open_rate_pct"], 50.0)
+        self.assertEqual(summary["avg_next_open_premium_pct"], 0.5)
+
 
 class ReportTest(unittest.TestCase):
     def test_time_report_contains_both_groups_and_limits(self):
@@ -189,6 +254,8 @@ class ReportTest(unittest.TestCase):
         text = MODULE.render_time_report(result)
         self.assertIn("打板股组", text)
         self.assertIn("第二梯队组", text)
+        self.assertIn("当日封板率", text)
+        self.assertIn("次日正溢价率", text)
         self.assertIn("当前概念成分不是历史快照", text)
         self.assertIn("不构成投资建议", text)
 
@@ -235,6 +302,167 @@ class ReportTest(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("--times", completed.stdout)
+
+
+class IntegrationTest(unittest.TestCase):
+    def test_selects_limit_and_second_line_groups_separately(self):
+        current_rows = [
+            {
+                "code": "sh600001",
+                "name": "甲",
+                "board_count": 2,
+                "first_seal": "09:31:00",
+                "last_seal": "10:45:00",
+                "open_count": 1,
+                "turnover_pct": 10.0,
+                "reason_tags": ["机器人"],
+            },
+        ]
+        bars = {
+            "sh600001": make_trade_bars(11.25, 11.25, 11.50),
+            "sh600002": make_trade_bars(10.43, 10.80, 10.90),
+        }
+        members = [
+            {"code": "sh600001", "name": "甲", "float_cap_yi": 50.0},
+            {"code": "sh600002", "name": "乙", "float_cap_yi": 30.0},
+        ]
+        signals, skipped = MODULE.select_candidates_for_day(
+            "10:30:00",
+            "2026-01-25",
+            [{"theme": "机器人", "theme_score": 70}],
+            current_rows,
+            {"机器人": "BK1001"},
+            bars,
+            lambda code: bars[code],
+            lambda _board: members,
+            {},
+            min_candidate_score=60,
+        )
+        by_group = {row["group"]: row for row in signals}
+        self.assertEqual(by_group["limit"]["code"], "sh600001")
+        self.assertEqual(by_group["second_line"]["code"], "sh600002")
+        self.assertEqual(skipped, [])
+
+    def test_missing_board_mapping_keeps_limit_group_only(self):
+        current_rows = [
+            {
+                "code": "sh600001",
+                "name": "甲",
+                "board_count": 2,
+                "first_seal": "09:31:00",
+                "last_seal": "10:45:00",
+                "open_count": 1,
+                "turnover_pct": 10.0,
+                "reason_tags": ["机器人"],
+            },
+        ]
+        bars = {"sh600001": make_trade_bars(11.25, 11.25, 11.50)}
+        signals, skipped = MODULE.select_candidates_for_day(
+            "10:30:00",
+            "2026-01-25",
+            [{"theme": "机器人", "theme_score": 70}],
+            current_rows,
+            {},
+            bars,
+            lambda code: bars[code],
+            lambda _board: [],
+            {},
+            min_candidate_score=60,
+        )
+        self.assertEqual([row["group"] for row in signals], ["limit"])
+        self.assertEqual(skipped[0]["reason"], "未找到同名精确概念板块")
+
+    def test_time_point_keeps_group_capital_independent(self):
+        dates = ["2026-01-24", "2026-01-25", "2026-01-26"]
+        current = [
+            {
+                "code": "sh600001",
+                "name": "甲",
+                "board_count": 2,
+                "first_seal": "09:31:00",
+                "last_seal": "10:45:00",
+                "open_count": 1,
+                "turnover_pct": 10.0,
+                "reason_tags": ["机器人"],
+            },
+            {
+                "code": "sh600003",
+                "name": "丙",
+                "board_count": 1,
+                "first_seal": "09:35:00",
+                "last_seal": "10:40:00",
+                "open_count": 1,
+                "turnover_pct": 9.0,
+                "reason_tags": ["机器人"],
+            },
+        ]
+        pools = {
+            dates[0]: [{
+                "code": "sh600001",
+                "name": "甲",
+                "board_count": 1,
+                "first_seal": None,
+                "reason_tags": ["机器人"],
+            }],
+            dates[1]: current,
+            dates[2]: [],
+        }
+        bars = {
+            "sh600001": make_trade_bars(11.25, 11.25, 11.50),
+            "sh600002": make_trade_bars(10.43, 10.80, 10.90),
+            "sh600003": make_trade_bars(11.25, 11.25, 11.20),
+        }
+        members = [
+            {"code": "sh600001", "name": "甲", "float_cap_yi": 50.0},
+            {"code": "sh600002", "name": "乙", "float_cap_yi": 30.0},
+            {"code": "sh600003", "name": "丙", "float_cap_yi": 40.0},
+        ]
+        result = MODULE.run_time_point(
+            "10:30:00",
+            pools,
+            dates,
+            {"机器人": "BK1001"},
+            10000.0,
+            {
+                "commission_rate": 0.00025,
+                "min_commission": 5.0,
+                "stamp_duty_rate": 0.0005,
+                "transfer_rate": 0.00001,
+            },
+            load_bars=lambda code: bars[code],
+            load_members=lambda _board: members,
+            min_theme_score=40,
+            min_candidate_score=60,
+        )
+        self.assertEqual(result["groups"]["limit"]["summary"]["trade_count"], 1)
+        self.assertEqual(
+            result["groups"]["second_line"]["summary"]["trade_count"], 1)
+        self.assertEqual(
+            result["groups"]["limit"]["summary"]["initial_capital"], 10000.0)
+        self.assertEqual(
+            result["groups"]["second_line"]["summary"]["initial_capital"],
+            10000.0,
+        )
+
+
+class BulkLoadTest(unittest.TestCase):
+    def test_preload_bars_loads_each_missing_code_once(self):
+        loaded = []
+
+        def load_bars(code):
+            loaded.append(code)
+            return [{"date": "2026-01-25", "code": code}]
+
+        bars, errors = MODULE.preload_bars(
+            ["sh600001", "sh600002", "sh600001"],
+            {},
+            load_bars,
+            workers=2,
+        )
+
+        self.assertEqual(set(bars), {"sh600001", "sh600002"})
+        self.assertEqual(sorted(loaded), ["sh600001", "sh600002"])
+        self.assertEqual(errors, [])
 
 
 if __name__ == "__main__":

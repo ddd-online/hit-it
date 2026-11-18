@@ -22,6 +22,10 @@
 
 {{second_line_trades}}
 
+## 跳过原因
+
+{{skipped}}
+
 ## 数据完整性与限制
 
 {{limitations}}

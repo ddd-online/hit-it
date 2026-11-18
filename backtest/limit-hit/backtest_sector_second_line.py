@@ -5,8 +5,10 @@
 import argparse
 import collections
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 
 BACKTEST_DIR = Path(__file__).resolve().parent
@@ -16,7 +18,10 @@ sys.path.insert(0, str(REPO_ROOT / "limit-hit" / "scripts"))
 
 import backtest_limit_hit as backtest  # noqa: E402
 import fallback_sources  # noqa: E402
+import fetch_sector_boards as sector_boards  # noqa: E402
 import fetch_sector_leaders as sector_leaders  # noqa: E402
+import fetch_stock_structure  # noqa: E402
+import http_util  # noqa: E402
 
 
 ALLOWED_TIMES = ("09:40", "10:00", "10:30", "11:00")
@@ -288,7 +293,204 @@ def run_group(signals, initial_capital, fees, signal_days=None):
         initial_capital,
         signal_days if signal_days is not None else len(trades),
     )
+    premiums = [
+        trade["next_open_premium_pct"]
+        for trade in trades
+        if trade.get("next_open_premium_pct") is not None
+    ]
+    summary.update({
+        "sealed_count": sum(bool(trade.get("sealed_close")) for trade in trades),
+        "seal_rate_pct": round(
+            sum(bool(trade.get("sealed_close")) for trade in trades)
+            * 100.0 / len(trades),
+            2,
+        ) if trades else None,
+        "next_open_premium_sample": len(premiums),
+        "positive_next_open_rate_pct": round(
+            sum(value > 0 for value in premiums) * 100.0 / len(premiums),
+            2,
+        ) if premiums else None,
+        "avg_next_open_premium_pct": round(
+            sum(premiums) / len(premiums), 4
+        ) if premiums else None,
+    })
     return {"summary": summary, "trades": trades}
+
+
+def bars_at(bars, data_date):
+    for index, bar in enumerate(bars):
+        if bar.get("date") == data_date:
+            next_bar = bars[index + 1] if index + 1 < len(bars) else None
+            return bar, next_bar
+    return None, None
+
+
+def preload_bars(codes, bars_by_code, load_bars, workers=1):
+    missing = list(dict.fromkeys(
+        code for code in codes if code not in bars_by_code
+    ))
+    errors = []
+    if workers <= 1:
+        for code in missing:
+            try:
+                bars_by_code[code] = load_bars(code)
+            except Exception as exc:  # noqa: BLE001 单票失败不阻断整批
+                bars_by_code[code] = []
+                errors.append({"code": code, "error": str(exc)})
+        return bars_by_code, errors
+
+    with ThreadPoolExecutor(max_workers=min(workers, 16)) as executor:
+        futures = {
+            executor.submit(load_bars, code): code
+            for code in missing
+        }
+        for future in as_completed(futures):
+            code = futures[future]
+            try:
+                bars_by_code[code] = future.result()
+            except Exception as exc:  # noqa: BLE001 单票失败不阻断整批
+                bars_by_code[code] = []
+                errors.append({"code": code, "error": str(exc)})
+    return bars_by_code, errors
+
+
+def signal_from_candidate(candidate, bars, group):
+    day, next_bar = bars_at(bars, candidate["data_date"])
+    if (
+            not day
+            or not next_bar
+            or day.get("close") is None
+            or next_bar.get("open") is None):
+        return None
+    entry_price = day["close"] if group == "limit" else day["open"]
+    if entry_price is None:
+        return None
+    return {
+        "date": candidate["data_date"],
+        "exit_date": next_bar["date"],
+        "theme": candidate["theme"],
+        "theme_score": candidate["theme_score"],
+        "code": candidate["code"],
+        "name": candidate["name"],
+        "group": group,
+        "entry_price": entry_price,
+        "exit_price": next_bar["open"],
+        "outcome": candidate_outcome(candidate, next_bar),
+    }
+
+
+def select_candidates_for_day(
+        time, data_date, themes, current_rows, board_index,
+        bars_by_code, load_bars, load_members, members_cache,
+        min_candidate_score=60, workers=1):
+    signals = []
+    skipped = []
+    visible_codes = {row["code"] for row in current_rows}
+
+    for theme_item in themes:
+        theme = theme_item["theme"]
+        limit_rows = [
+            row for row in current_rows
+            if theme in backtest.reason_tags(row)
+            and backtest.candidate_eligible(row)
+            and backtest.candidate_score(row) >= min_candidate_score
+            and backtest.entry_visible(
+                row, time, require_reseal_after=True)
+        ]
+        if limit_rows:
+            selected = max(
+                limit_rows,
+                key=lambda row: (
+                    backtest.candidate_score(row),
+                    row.get("board_count") or 0,
+                ),
+            )
+            preload_bars(
+                [selected["code"]], bars_by_code, load_bars, workers)
+            bars = bars_by_code.get(selected["code"], [])
+            feature = bar_features(bars, data_date)
+            if feature:
+                feature.update({
+                    "theme": theme,
+                    "theme_score": theme_item["theme_score"],
+                    "code": selected["code"],
+                    "name": selected.get("name"),
+                    "limit_price": feature["close"],
+                })
+                signal = signal_from_candidate(feature, bars, "limit")
+                if signal:
+                    signals.append(signal)
+                else:
+                    skipped.append({
+                        "date": data_date,
+                        "group": "limit",
+                        "code": selected["code"],
+                        "reason": "D+1 开盘缺失",
+                    })
+
+        board_code = board_index.get(theme)
+        if not board_code:
+            skipped.append({
+                "date": data_date,
+                "group": "second_line",
+                "theme": theme,
+                "reason": "未找到同名精确概念板块",
+            })
+            continue
+
+        members = members_cache.get(board_code)
+        if members is None:
+            members = load_members(board_code)
+            members_cache[board_code] = members
+
+        preload_bars(
+            [member["code"] for member in members],
+            bars_by_code,
+            load_bars,
+            workers,
+        )
+
+        candidates = []
+        for member in members:
+            if member["code"] in visible_codes:
+                continue
+            bars = bars_by_code.get(member["code"], [])
+            feature = bar_features(bars, data_date)
+            if not second_line_eligible(feature):
+                continue
+            if not can_fill_second_line(feature):
+                continue
+            candidates.append({
+                **feature,
+                "code": member["code"],
+                "name": member.get("name"),
+                "theme": theme,
+                "theme_score": theme_item["theme_score"],
+                "float_cap_yi": member.get("float_cap_yi"),
+            })
+        if candidates:
+            selected = max(
+                candidates,
+                key=lambda row: (
+                    row["theme_score"],
+                    -abs(row["open_gap_pct"] - 3.0),
+                    row.get("previous_volume_ratio5") or 0.0,
+                    -(row.get("float_cap_yi") or float("inf")),
+                ),
+            )
+            bars = bars_by_code[selected["code"]]
+            signal = signal_from_candidate(selected, bars, "second_line")
+            if signal:
+                signals.append(signal)
+            else:
+                skipped.append({
+                    "date": data_date,
+                    "group": "second_line",
+                    "code": selected["code"],
+                    "reason": "D+1 开盘缺失",
+                })
+
+    return dedupe_candidates(signals), skipped
 
 
 def report_paths(workspace, start, end, times):
@@ -324,6 +526,12 @@ def render_summary(group):
             backtest.rate(summary["direction_win_rate_pct"])),
         "| 净收益胜率 | {} |".format(
             backtest.rate(summary["net_win_rate_pct"])),
+        "| 当日封板率 | {} |".format(
+            backtest.rate(summary.get("seal_rate_pct"))),
+        "| 次日正溢价率 | {} |".format(
+            backtest.rate(summary.get("positive_next_open_rate_pct"))),
+        "| 平均次日溢价 | {} |".format(
+            backtest.pct(summary.get("avg_next_open_premium_pct"))),
         "| 期末本金 | {} 元 |".format(
             backtest.money(summary["ending_capital"])),
         "| 净收益率 | {} |".format(
@@ -354,6 +562,21 @@ def render_trades(trades):
     return "\n".join(lines)
 
 
+def render_skipped(skipped):
+    grouped = collections.Counter(
+        (row.get("group") or "-", row["reason"]) for row in skipped
+    )
+    lines = [
+        "| 分组 | 原因 | 次数 |",
+        "|---|---|---:|",
+    ]
+    for (group, reason), count in sorted(grouped.items()):
+        lines.append("| {} | {} | {} |".format(group, reason, count))
+    if not skipped:
+        lines.append("| - | 无 | 0 |")
+    return "\n".join(lines)
+
+
 def render_time_report(result):
     text = TEMPLATE_PATH.read_text(encoding="utf-8")
     replacements = {
@@ -367,6 +590,7 @@ def render_time_report(result):
             result["groups"]["second_line"]),
         "second_line_trades": render_trades(
             result["groups"]["second_line"]["trades"]),
+        "skipped": render_skipped(result.get("skipped", [])),
         "limitations": "\n".join(
             "- " + item for item in result["limitations"]),
     }
@@ -398,6 +622,95 @@ def render_comparison(results):
     return "\n".join(lines)
 
 
+def default_board_catalog():
+    args = SimpleNamespace(
+        type="concept",
+        source="eastmoney",
+        sort="change",
+        top=10000,
+        min_up=0,
+        search=[],
+    )
+    _source, rows, _meta = sector_boards.prepare_rows(args)
+    return rows
+
+
+def default_load_bars(code):
+    bars, _source, _limitations = fetch_stock_structure.fetch_kline(
+        code, days=400, cutoff=None)
+    return bars
+
+
+def run_time_point(
+        time,
+        pools,
+        dates,
+        board_index,
+        capital,
+        fees,
+        bars_by_code=None,
+        members_cache=None,
+        load_bars=None,
+        load_members=None,
+        min_theme_score=50,
+        min_candidate_score=60,
+        workers=1):
+    bars_by_code = bars_by_code if bars_by_code is not None else {}
+    members_cache = members_cache if members_cache is not None else {}
+    load_bars = load_bars or default_load_bars
+    load_members = load_members or member_rows
+    selected = []
+    skipped = []
+
+    for index, data_date in enumerate(dates):
+        current = visible_limit_rows(pools.get(data_date, []), time)
+        previous = pools.get(dates[index - 1], []) if index else []
+        themes = theme_ladder(
+            current,
+            previous,
+            min_score=min_theme_score,
+            max_themes=3,
+        )
+        day_signals, day_skipped = select_candidates_for_day(
+            time,
+            data_date,
+            themes,
+            current,
+            board_index,
+            bars_by_code,
+            load_bars,
+            load_members,
+            members_cache,
+            min_candidate_score=min_candidate_score,
+            workers=workers,
+        )
+        selected.extend(day_signals)
+        skipped.extend(day_skipped)
+
+    limit_signals = [row for row in selected if row["group"] == "limit"]
+    second_signals = [
+        row for row in selected if row["group"] == "second_line"
+    ]
+    return {
+        "time": time,
+        "groups": {
+            "limit": run_group(
+                limit_signals,
+                capital,
+                fees,
+                signal_days=len({row["date"] for row in limit_signals}),
+            ),
+            "second_line": run_group(
+                second_signals,
+                capital,
+                fees,
+                signal_days=len({row["date"] for row in second_signals}),
+            ),
+        },
+        "skipped": skipped,
+    }
+
+
 def build_arg_parser():
     parser = argparse.ArgumentParser(description="板块第二梯队结构代理回测")
     parser.add_argument("--start", required=True, help="开始日期 YYYYMMDD")
@@ -415,5 +728,79 @@ def build_arg_parser():
     return parser
 
 
+def main():
+    args = build_arg_parser().parse_args()
+    if args.capital <= 0:
+        raise SystemExit("错误：--capital 必须大于 0")
+
+    start_date = backtest.parse_date(args.start)
+    end_date = backtest.parse_date(args.end)
+    dates, warmup_dates, _index_bars = backtest.get_trading_dates(
+        start_date, end_date)
+    if not dates:
+        raise RuntimeError("区间内没有交易日")
+
+    all_dates = warmup_dates + dates
+    pools, errors = backtest.load_pools(all_dates, args.workers)
+    backtest.apply_consecutive_board_counts(pools, all_dates)
+    board_index = build_board_index(default_board_catalog())
+    fees = {
+        "commission_rate": 0.00025,
+        "min_commission": 5.0,
+        "stamp_duty_rate": 0.0005,
+        "transfer_rate": 0.00001,
+    }
+    limitations = [
+        "当前概念成分不是历史快照，存在概念调整和幸存者偏差。",
+        "日 K 无法还原四个时点的真实价格、量比和盘口。",
+        "D 日开盘价是第二梯队组指定的历史代理买入价。",
+    ]
+    requested_dates = set(dates)
+    requested_errors = [
+        error for error in errors if error["date"] in requested_dates
+    ]
+    if requested_errors:
+        limitations.append(
+            "历史涨停池缺失/失败 {} 日；示例：{}".format(
+                len(requested_errors),
+                "、".join(row["date"] for row in requested_errors[:10]),
+            )
+        )
+
+    paths = report_paths(Path.cwd(), args.start, args.end, args.times)
+    bars_by_code = {}
+    members_cache = {}
+    results = []
+    for time in args.times:
+        print("执行时点 {}".format(time), file=sys.stderr)
+        result = run_time_point(
+            time,
+            pools,
+            dates,
+            board_index,
+            args.capital,
+            fees,
+            bars_by_code=bars_by_code,
+            members_cache=members_cache,
+            workers=args.workers,
+        )
+        result.update({
+            "start": args.start,
+            "end": args.end,
+            "capital": args.capital,
+            "limitations": limitations,
+        })
+        results.append(result)
+        path = paths[time]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(render_time_report(result), encoding="utf-8")
+
+    comparison_path = paths["comparison"]
+    comparison_path.parent.mkdir(parents=True, exist_ok=True)
+    comparison_path.write_text(
+        render_comparison(results), encoding="utf-8")
+    print("报告：{}".format(comparison_path))
+
+
 if __name__ == "__main__":
-    build_arg_parser().parse_args()
+    http_util.run(main)
