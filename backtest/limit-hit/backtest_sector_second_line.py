@@ -142,3 +142,93 @@ def dedupe_candidates(candidates):
         best.values(),
         key=lambda row: (-row["theme_score"], row["code"]),
     )
+
+
+def pct_change(now, before):
+    if now is None or not before:
+        return None
+    return round((now / before - 1.0) * 100.0, 4)
+
+
+def mean(values):
+    values = [value for value in values if value is not None]
+    return sum(values) / len(values) if values else None
+
+
+def bar_features(bars, data_date):
+    eligible = [
+        bar for bar in bars
+        if bar.get("date") and bar["date"] <= data_date
+    ]
+    if len(eligible) < 21 or eligible[-1]["date"] != data_date:
+        return None
+    day = eligible[-1]
+    previous = eligible[-2]
+    previous_window = eligible[:-1]
+    closes = [
+        bar.get("close") for bar in previous_window[-20:]
+        if bar.get("close") is not None
+    ]
+    if len(closes) < 20:
+        return None
+    volumes = [
+        bar.get("volume_hands") if bar.get("volume_hands") is not None
+        else bar.get("volume")
+        for bar in previous_window[-20:]
+    ]
+    previous_close = previous.get("close")
+    if previous_close is None:
+        return None
+    ma5 = mean(closes[-5:])
+    ma10 = mean(closes[-10:])
+    range20_low = min(bar["low"] for bar in previous_window[-20:])
+    range20_high = max(bar["high"] for bar in previous_window[-20:])
+    prior_volume_average = mean(volumes[-6:-1])
+    return {
+        "data_date": data_date,
+        "previous_close": previous_close,
+        "open": day.get("open"),
+        "high": day.get("high"),
+        "low": day.get("low"),
+        "close": day.get("close"),
+        "limit_price": round(previous_close * 1.10, 2),
+        "open_gap_pct": pct_change(day.get("open"), previous_close),
+        "previous_ma5": round(ma5, 4),
+        "previous_ma10": round(ma10, 4),
+        "previous_return5_pct": pct_change(
+            previous_close,
+            previous_window[-6]["close"] if len(previous_window) >= 6 else None,
+        ),
+        "previous_position20_pct": round(
+            (previous_close - range20_low)
+            / (range20_high - range20_low) * 100.0,
+            2,
+        ) if range20_high > range20_low else None,
+        "previous_volume_ratio5": round(
+            volumes[-1] / prior_volume_average, 3
+        ) if len(volumes) >= 6 and prior_volume_average else None,
+    }
+
+
+def second_line_eligible(feature):
+    if not feature:
+        return False
+    required = (
+        feature.get("open"),
+        feature.get("previous_close"),
+        feature.get("previous_ma5"),
+        feature.get("previous_ma10"),
+        feature.get("open_gap_pct"),
+        feature.get("previous_return5_pct"),
+        feature.get("previous_position20_pct"),
+    )
+    if any(value is None for value in required):
+        return False
+    return bool(
+        feature["open"] < feature["limit_price"] - 0.001
+        and -3.0 <= feature["open_gap_pct"] <= 5.0
+        and feature["previous_close"] >= feature["previous_ma5"]
+        and feature["previous_close"] >= feature["previous_ma10"]
+        and -3.0 <= feature["previous_return5_pct"] <= 15.0
+        and 20.0 <= feature["previous_position20_pct"] <= 85.0
+    )

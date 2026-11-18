@@ -73,5 +73,42 @@ class MembershipTest(unittest.TestCase):
         self.assertEqual(deduped[0]["theme"], "强题材")
 
 
+def make_bars():
+    bars = []
+    for index in range(25):
+        close = 10.0 + index * 0.01
+        bars.append({
+            "date": "2026-01-{:02d}".format(index + 1),
+            "open": close - 0.03,
+            "high": close + 0.08,
+            "low": close - 0.08,
+            "close": close,
+            "volume_hands": 1000.0,
+        })
+    return bars
+
+
+class FeatureTest(unittest.TestCase):
+    def test_features_use_previous_day_structure(self):
+        bars = make_bars()
+        day = bars[-1]
+        day["open"] = round(bars[-2]["close"] * 1.02, 2)
+        feature = MODULE.bar_features(bars, day["date"])
+        self.assertEqual(feature["previous_close"], bars[-2]["close"])
+        self.assertEqual(feature["open_gap_pct"], 1.955)
+
+    def test_second_line_rejects_limit_open(self):
+        bars = make_bars()
+        bars[-1]["open"] = round(bars[-2]["close"] * 1.10, 2)
+        feature = MODULE.bar_features(bars, bars[-1]["date"])
+        self.assertFalse(MODULE.second_line_eligible(feature))
+
+    def test_second_line_accepts_controlled_open(self):
+        bars = make_bars()
+        bars[-1]["open"] = round(bars[-2]["close"] * 1.02, 2)
+        feature = MODULE.bar_features(bars, bars[-1]["date"])
+        self.assertTrue(MODULE.second_line_eligible(feature))
+
+
 if __name__ == "__main__":
     unittest.main()
