@@ -110,5 +110,46 @@ class FeatureTest(unittest.TestCase):
         self.assertTrue(MODULE.second_line_eligible(feature))
 
 
+class SimulationTest(unittest.TestCase):
+    def test_candidate_outcome_marks_seal_and_premium(self):
+        feature = {
+            "data_date": "2026-01-05",
+            "open": 10.0,
+            "close": 11.0,
+            "limit_price": 11.0,
+            "previous_close": 10.0,
+        }
+        outcome = MODULE.candidate_outcome(feature, {"open": 11.3})
+        self.assertTrue(outcome["sealed_close"])
+        self.assertEqual(outcome["next_open_premium_pct"], 2.7273)
+
+    def test_open_limit_cannot_fill_second_line(self):
+        feature = {
+            "data_date": "2026-01-05",
+            "open": 11.0,
+            "close": 11.0,
+            "limit_price": 11.0,
+            "previous_close": 10.0,
+        }
+        self.assertFalse(MODULE.can_fill_second_line(feature))
+
+    def test_group_capital_compounds_once_per_day(self):
+        signals = [
+            {"date": "2026-01-05", "entry_price": 10.0,
+             "exit_price": 11.0, "theme": "机器人"},
+            {"date": "2026-01-05", "entry_price": 10.0,
+             "exit_price": 12.0, "theme": "机器人"},
+            {"date": "2026-01-06", "entry_price": 11.0,
+             "exit_price": 10.5, "theme": "机器人"},
+        ]
+        result = MODULE.run_group(
+            signals, 10000.0,
+            {"commission_rate": 0.00025, "min_commission": 5.0,
+             "stamp_duty_rate": 0.0005, "transfer_rate": 0.00001},
+        )
+        self.assertEqual(result["summary"]["trade_count"], 2)
+        self.assertEqual(result["summary"]["ending_capital"], 10519.37)
+
+
 if __name__ == "__main__":
     unittest.main()

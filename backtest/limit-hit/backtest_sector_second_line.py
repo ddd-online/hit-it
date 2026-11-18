@@ -232,3 +232,59 @@ def second_line_eligible(feature):
         and -3.0 <= feature["previous_return5_pct"] <= 15.0
         and 20.0 <= feature["previous_position20_pct"] <= 85.0
     )
+
+
+def candidate_outcome(feature, next_bar):
+    close = feature.get("close")
+    next_open = (next_bar or {}).get("open")
+    return {
+        "sealed_close": bool(
+            close is not None
+            and close >= feature["limit_price"] * 0.999
+        ),
+        "next_open": next_open,
+        "next_open_premium_pct": pct_change(next_open, close),
+    }
+
+
+def can_fill_second_line(feature):
+    open_price = feature.get("open")
+    return bool(
+        open_price is not None
+        and open_price < feature["limit_price"] - 0.001
+    )
+
+
+def run_group(signals, initial_capital, fees, signal_days=None):
+    capital = initial_capital
+    trades = []
+    seen_dates = set()
+    for signal in sorted(signals, key=lambda row: row["date"]):
+        if signal["date"] in seen_dates:
+            continue
+        trade = backtest.simulate_trade(
+            signal,
+            signal["entry_price"],
+            signal["exit_price"],
+            capital,
+            fees,
+        )
+        if trade is None:
+            continue
+        seen_dates.add(signal["date"])
+        capital = trade["capital_after"]
+        trades.append({
+            "signal_date": signal["date"],
+            "exit_date": signal.get("exit_date"),
+            "theme": signal.get("theme"),
+            "code": signal.get("code"),
+            "name": signal.get("name"),
+            **trade,
+            **signal.get("outcome", {}),
+        })
+    summary = backtest.summarize_trades(
+        trades,
+        initial_capital,
+        signal_days if signal_days is not None else len(trades),
+    )
+    return {"summary": summary, "trades": trades}
