@@ -19,11 +19,6 @@ def load_module(name, filename, directory=SCRIPT_DIR):
 
 
 HISTORY = load_module("limit_hit_history_quality", "fetch_limit_up_history.py")
-BACKTEST = load_module(
-    "limit_hit_backtest_quality",
-    "backtest_limit_hit.py",
-    ROOT / "backtest" / "limit-hit",
-)
 LIMIT_UP = load_module("limit_hit_pool_quality", "fetch_limit_up.py")
 PREPARE = load_module("limit_hit_prepare_quality", "prepare_candidates.py")
 FLOW = load_module("limit_hit_flow_quality", "fetch_capital_flow.py")
@@ -58,85 +53,6 @@ class HistoryBoardSemanticsTest(unittest.TestCase):
         self.assertEqual(row["board_window"], None)
         self.assertEqual(row["board_window_count"], 4)
         self.assertEqual(row["board_count"], 4)
-
-
-class BacktestBoardDerivationTest(unittest.TestCase):
-    def test_board_count_comes_from_consecutive_pool_membership(self):
-        dates = [
-            "2026-11-10",
-            "2026-11-11",
-            "2026-11-12",
-            "2026-11-13",
-        ]
-        pools = {
-            dates[0]: [],
-            dates[1]: [
-                {"code": "sh600001", "board_window_count": 3},
-            ],
-            dates[2]: [
-                {"code": "sh600001", "board_window_count": 4},
-                {"code": "sh600002", "board_window_count": 2},
-            ],
-            dates[3]: [
-                {"code": "sh600001", "board_window_count": 5},
-                {"code": "sh600002", "board_window_count": 3},
-                {"code": "sh600003", "board_window_count": 2},
-            ],
-        }
-
-        BACKTEST.apply_consecutive_board_counts(pools, dates)
-
-        self.assertEqual(pools[dates[1]][0]["board_count"], 1)
-        self.assertEqual(pools[dates[2]][0]["board_count"], 2)
-        self.assertEqual(pools[dates[2]][1]["board_count"], 1)
-        self.assertEqual(pools[dates[3]][0]["board_count"], 3)
-        self.assertEqual(pools[dates[3]][1]["board_count"], 2)
-        self.assertEqual(pools[dates[3]][2]["board_count"], 1)
-
-    def test_missing_previous_pool_does_not_invent_one_board(self):
-        dates = ["2026-11-10", "2026-11-11"]
-        pools = {
-            dates[1]: [{"code": "sh600001", "board_window_count": 1}],
-        }
-
-        BACKTEST.apply_consecutive_board_counts(pools, dates)
-
-        self.assertIsNone(pools[dates[1]][0]["board_count"])
-
-    def test_exact_history_window_beats_incomplete_pool_membership(self):
-        dates = ["2026-11-11", "2026-11-12"]
-        pools = {
-            dates[0]: [{"code": "sz002623", "board_count": 3,
-                        "board_window_count": 3}],
-            dates[1]: [{"code": "sz002623", "board_count": 4,
-                        "board_window_count": 4}],
-        }
-
-        BACKTEST.apply_consecutive_board_counts(pools, dates)
-
-        self.assertEqual(pools[dates[1]][0]["board_count"], 4)
-
-    def test_requested_window_keeps_previous_trading_days_for_board_count(self):
-        bars = {
-            day: {"date": day}
-            for day in (
-                "2026-11-06",
-                "2026-11-09",
-                "2026-11-10",
-                "2026-11-11",
-                "2026-11-12",
-                "2026-11-13",
-            )
-        }
-        with mock.patch.object(BACKTEST, "fetch_raw_kline", return_value=bars):
-            requested, warmup, _ = BACKTEST.get_trading_dates(
-                datetime(2026, 11, 11).date(),
-                datetime(2026, 11, 13).date(),
-                lookback_days=2,
-            )
-
-        self.assertEqual(warmup, ["2026-11-09", "2026-11-10"])
-        self.assertEqual(requested, ["2026-11-11", "2026-11-12", "2026-11-13"])
 
 
 class PoolFieldTruthTest(unittest.TestCase):

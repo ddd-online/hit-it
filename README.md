@@ -33,13 +33,10 @@ hit-it/
 │   ├── agents/openai.yaml
 │   ├── references/
 │   └── scripts/
-├── backtest/
-│   ├── limit-hit/
-│   └── leader-hit/
 └── tests/
 ```
 
-`limit-hit/SKILL.md` 和 `leader-hit/SKILL.md` 分别是两个运行入口。各自的 `references/` 只提供运行期筛选细则和报告模板；回测、历史样本复核及回测报告模板统一放在 `backtest/`，不随技能安装。
+`limit-hit/SKILL.md` 和 `leader-hit/SKILL.md` 分别是两个运行入口。各自的 `references/` 只提供运行期筛选细则和报告模板。
 
 ## 环境要求
 
@@ -137,8 +134,6 @@ python D:\github\hit-it\limit-hit\scripts\fetch_stock_structure.py sh600410 --js
 
 一条命令可同时定位多个题材，复用同一份板块扫描结果。`prepare_candidates.py` 和取数脚本负责可复现的数据装配；第二梯队每只初筛股票由独立子代理走完整单股审视流程，只回报单股证据和候选状态。父模型负责检查行情时点一致性、横向比较、题材选优和最终落盘。第二梯队不套用机械总分，结论依据执行时点量价、市场情绪、历史涨跌幅、筹码结构和基本面地雷综合判断。
 
-现有 2026 年第二梯队回测只有日 K 和首次封板时间，缺少历史盘中完整成分股广度，不能严格验证 v1.7 的同源 `D` 准入。回测报告会明确该限制，不作为新规则的正收益证据。
-
 ## leader-hit 快速开始
 
 查找沪深主板 20 元以下股票：
@@ -157,15 +152,6 @@ python D:\github\hit-it\leader-hit\scripts\prepare_leader_candidates.py --price-
 
 ```powershell
 python D:\github\hit-it\leader-hit\scripts\prepare_leader_candidates.py --codes 600000,000001 --compact
-```
-
-2026 年主升样本时点回测：
-
-```powershell
-python D:\github\hit-it\leader-hit\scripts\prepare_leader_candidates.py --date 20260928 --price-max 15 --compact
-python D:\github\hit-it\backtest\leader-hit\review_leader_snapshot.py --date 20260928 --price-max 15
-python D:\github\hit-it\backtest\leader-hit\backtest_leader_hit.py --start 20260101 --end 20260630
-python D:\github\hit-it\backtest\leader-hit\backtest_leader_hit.py --start 20260701 --end 20261113 --report-tag 测试集
 ```
 
 输出固定状态为“建仓完成 / 洗盘中 / 待启动 / 启动初段 / 只观察 / 排除”。技术结构通过后，仍需核验精确概念、板块扩散、新闻和公告。
@@ -187,7 +173,6 @@ python D:\github\hit-it\backtest\leader-hit\backtest_leader_hit.py --start 20260
 
 规则 profile 固定从 `limit-hit/config/rules.yaml` 读取，默认是 `theme-first`；缺键或未知 profile 会直接报错。
 | `fetch_quote.py` | 腾讯个股行情快照与日K |
-| `backtest/limit-hit/backtest_limit_hit.py` | 2026 年以来的结构代理回测，默认本金 6000 元 |
 | `fallback_sources.py` | 腾讯、新浪、东财 F10 等备用数据源 |
 | `http_util.py` | 强制直连的公共网络层 |
 | `leader-hit/scripts/prepare_leader_candidates.py` | 沪深主板低价股、日K、筹码、量能、箱体和左侧涨停结构初判 |

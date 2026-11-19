@@ -4,7 +4,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,28 +20,6 @@ def load_module():
 
 
 LEADER = load_module()
-
-
-def load_backtest_module():
-    path = ROOT / "backtest" / "leader-hit" / "backtest_leader_hit.py"
-    spec = importlib.util.spec_from_file_location("leader_hit_backtest", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-BACKTEST = load_backtest_module()
-
-
-def load_review_module():
-    path = ROOT / "backtest" / "leader-hit" / "review_leader_snapshot.py"
-    spec = importlib.util.spec_from_file_location("leader_hit_review", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-REVIEW = load_review_module()
 
 
 def base_features():
@@ -280,37 +257,6 @@ class HistoricalReplayTest(unittest.TestCase):
         self.assertEqual(quote["price"], 9.8)
         self.assertEqual(quote["quote_date"], "2026-06-30")
 
-    def test_detects_one_low_price_main_rally_case(self):
-        first_day = date(2025, 10, 1)
-        bars = []
-        for index in range(140):
-            price = 10.0
-            if index >= 110:
-                price = [10.95, 11.99, 12.5, 12.8, 13.3][index - 110] \
-                    if index < 115 else 13.0
-            bars.append({
-                "date": (first_day + timedelta(days=index)).isoformat(),
-                "open": price,
-                "close": price,
-                "high": price,
-                "low": price,
-                "volume_hands": 1000.0 + (index % 3) * 100.0,
-                "amount_yuan": None,
-                "turnover_pct": 1.0,
-            })
-        stock = {
-            "code": "sh600001",
-            "name": "测试",
-            "bars": bars,
-            "metric_quality": "degraded",
-        }
-        start_date = bars[110]["date"]
-        end_date = bars[111]["date"]
-        cases = BACKTEST.detect_cases(
-            stock, start_date, end_date, 20, 30.0, 15.0, 2, 18.0, 20.0)
-        self.assertEqual(len(cases), 1)
-        self.assertEqual(cases[0]["start_date"], bars[110]["date"])
-
     def test_historical_universe_filters_on_target_date_close(self):
         universe = [
             {"code": "sh600001", "name": "甲"},
@@ -343,33 +289,6 @@ class HistoricalReplayTest(unittest.TestCase):
         self.assertEqual(universe_count, 2)
         self.assertEqual(eligible_count, 1)
         self.assertEqual([row["code"] for row in rows], ["sh600001"])
-
-    def test_future_stats_measures_rise_and_limit_ups(self):
-        prices = [10.0, 11.0, 12.1, 14.0, 12.6, 12.9]
-        bars = [{
-            "date": (date(2026, 9, 28) + timedelta(days=index)).isoformat(),
-            "close": price,
-            "open": price,
-            "high": price,
-            "low": price,
-            "volume_hands": 100.0,
-        } for index, price in enumerate(prices)]
-        stats = REVIEW.future_stats(
-            {"bars": bars}, "2026-09-28", horizon=5)
-        self.assertEqual(stats["future_max_return_pct"], 40.0)
-        self.assertEqual(stats["future_final_return_pct"], 29.0)
-        self.assertEqual(stats["future_limit_up_count"], 3)
-        self.assertEqual(stats["future_max_drawdown_pct"], -10.0)
-
-    def test_display_rank_uses_visible_status_then_score(self):
-        rows = [
-            {"code": "weak", "status": "启动初段", "technical_score": 50},
-            {"code": "strong", "status": "启动初段", "technical_score": 80},
-            {"code": "wait", "status": "待启动", "technical_score": 99},
-        ]
-        ranked = REVIEW.display_top(rows, 2)
-        self.assertEqual([row["code"] for row in ranked], ["strong", "weak"])
-
 
 if __name__ == "__main__":
     unittest.main()

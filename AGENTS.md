@@ -29,14 +29,11 @@ hit-it/
 │   ├── agents/openai.yaml
 │   ├── references/
 │   └── scripts/
-├── backtest/
-│   ├── limit-hit/
-│   └── leader-hit/
 └── tests/
 ```
 
 - `limit-hit/SKILL.md` 和 `leader-hit/SKILL.md` 分别是各自唯一业务入口。
-- 两个 `references/` 目录只存放运行期筛选细则、运行边界和报告模板；回测和历史样本复核内容位于 `backtest/`。
+- 两个 `references/` 目录只存放运行期筛选细则、运行边界和报告模板。
 - `limit-hit/scripts/` 是完整运行期取数层；`leader-hit/scripts/` 自带行情、日 K 与筹码推演所需代码，可单独安装到项目的 `skills/` 目录。
 - `tests/` 覆盖预计算路径、报告解析、题材聚合和脚本自包含性。
 
@@ -88,8 +85,6 @@ python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --stock 日发�
 - 单股盘中量比和换手是截至快照的部分日数据，必须标“盘中部分量”；不得冒充全天量能。
 - 单股 `quote_date != data_date` 时停止给出“继续持有 / 条件持有 / 不继续持有”结论。
 - `--compact` 只列前 30 个题材；完整列表使用 `--json`，不得把截断列表误写成全量。
-- 结构代理回测使用 `backtest/limit-hit/backtest_limit_hit.py --start YYYYMMDD --end YYYYMMDD --capital 6000`，报告按同目录 `backtest-report-template.md` 输出到 `report/回测/`；必须标注历史消息和分时扩散不可复现。
-- 第二梯队结构代理回测无法重建历史盘中完整成分股广度，不能验证 v1.7 的同源完整样本 `D` 准入；报告必须明确该限制，不得包装成新规则的正收益证据。
 - `data_date` 是行情实际日期，`generated_at` 是执行时间，两者不得混用。
 - `quote_date != data_date` 时，本轮接力反馈不是当日口径；标“数据未获取”，停止给出可打板结论。
 - `quote_time` 必须来自行情响应；09:25 前 `open=0` 标“未撮合”，不得计算 gap、涨跌家数或均值。09:25–10:30 的低晋级率只能标“退潮待确认”，10:30 后才确认退潮。
@@ -149,7 +144,7 @@ python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --stock 日发�
 - 09:25 前“昨日涨停今日集体开盘”整节写“开盘价未撮合”，所有涨跌家数和均值写“未获取”，不得出现 `-100%`。
 - 单股报告同样保留上述三节，并增加价格承接、量能、筹码、题材、消息与硬风险维度。
 - “可打板”必须同时写执行触发和失效条件。
-- “第二梯队候选”必须写 T 时点仍可执行、触发和失效条件；不得用未来封板、收盘价或回测开盘价倒推成交。
+- “第二梯队候选”必须写 T 时点仍可执行、触发和失效条件；不得用未来封板、收盘价或代理开盘价倒推成交。
 - 第二梯队必须回显“状态上限：X（来源：...）”；退潮、高标崩塌或启用中的宽度否决不得产生候选。
 - 第二梯队报告必须记录分股子代理评估数量；使用串行降级时写明原因。
 - 第二梯队报告必须写 `core / ladder / D`、数据是否完整和“状态上限：X（来源：...）”。
@@ -182,7 +177,6 @@ python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --stock 日发�
 ```powershell
 python -m unittest discover -s tests -v
 python -m compileall -q limit-hit/scripts
-python -m compileall -q backtest
 ```
 
 - 修改取数脚本后，还要用真实标的验证文本和 `--json` 两条分支。
