@@ -18,7 +18,7 @@ python limit-hit/scripts/save_limit_pool.py --date YYYYMMDD
 
 ```bash
 python limit-hit/scripts/prepare_candidates.py --compact
-python limit-hit/scripts/prepare_candidates.py --profile default --compact
+python limit-hit/scripts/prepare_candidates.py --profile theme-first --compact
 ```
 
 单股持仓审视使用同一入口：

@@ -1266,7 +1266,7 @@ def main():
     ap = argparse.ArgumentParser(description="limit-hit 候选上下文预计算")
     ap.add_argument("--stock", help="单股名称或代码；输出持仓审视事实，不要求当日涨停")
     ap.add_argument("--profile", default="theme-first",
-                    help="规则预设，默认 theme-first")
+                    help="唯一规则预设 theme-first")
     output = ap.add_mutually_exclusive_group()
     output.add_argument("--json", action="store_true", help="输出完整 JSON，供审计和调试")
     output.add_argument("--compact", action="store_true", help="输出模型友好的单行紧凑 JSON")

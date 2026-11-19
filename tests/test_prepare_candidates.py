@@ -541,27 +541,21 @@ class ProfilePipelineTest(unittest.TestCase):
                 }), encoding="utf-8")
                 with mock.patch.object(
                         MODULE, "run_json", side_effect=fake_run_json):
-                    default = MODULE.build_payload()
-                    theme_first = MODULE.build_payload(profile="theme-first")
+                    result = MODULE.build_payload(profile="theme-first")
             finally:
                 os.chdir(old_cwd)
 
         self.assertEqual(
-            [row["code"] for row in default["candidates"]],
+            [row["code"] for row in result["candidates"]],
             ["sh600001", "sh600002"],
         )
+        self.assertTrue(result["candidates"][0]["one_word"])
         self.assertEqual(
-            [row["code"] for row in theme_first["candidates"]],
+            result["themes"][0]["candidate_codes"],
             ["sh600001", "sh600002"],
         )
-        self.assertTrue(theme_first["candidates"][0]["one_word"])
-        self.assertEqual(
-            default["themes"][0]["candidate_codes"],
-            ["sh600001", "sh600002"],
-        )
-        self.assertEqual(default["market_gate"]["action"], "max_one")
-        self.assertEqual(theme_first["market_gate"]["action"], "max_one")
-        self.assertNotIn("candidates", default["one_word_filter"])
+        self.assertEqual(result["market_gate"]["action"], "max_one")
+        self.assertNotIn("candidates", result["one_word_filter"])
 
 
 if __name__ == "__main__":

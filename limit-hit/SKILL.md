@@ -58,7 +58,7 @@ python limit-hit/scripts/prepare_candidates.py --compact
 python limit-hit/scripts/prepare_candidates.py --compact
 ```
 
-`default` 当前与 `theme-first` 等价，可通过 `--profile` 显式指定；`--profile v1.6` 可复现第二梯队准入旧口径，`--profile v1.4` 可复现更早口径。其他自定义 profile 仍从 `config/rules.yaml` 加载。
+唯一可用 profile 是 `theme-first`；显式传入其他名称必须报“未知 profile”并停止，不得回退到默认口径。
 
 保存脚本默认取最近已完成交易日，写入当前目录 `report/涨停池/<date>.json`；需要补某日时使用 `--date YYYYMMDD`。`prepare_candidates.py` 一次性完成当日实拉、昨日文件读取、概念聚合、梯队统计和候选指标计算，不自动生成涨停池。模型读取输出，不重复手工拉取或计算这些字段。具体边界见 [references/runtime-context.md](references/runtime-context.md)。
 
@@ -207,7 +207,7 @@ A 股短线默认不把营收、净利、负债率、估值作为主要加减分
 python limit-hit/scripts/prepare_candidates.py --stock <名称或代码> --compact
 ```
 
-单股模式使用同一默认 `theme-first`；需要自定义时通过 `--profile` 指定。
+单股模式同样只使用 `theme-first`。
 
 - 名称必须唯一精确匹配；找不到、重名或模糊命中多只时停止，要求用户提供代码，不猜股票。
 - 只支持沪深主板。创业板、科创板和北交所直接提示超出范围。

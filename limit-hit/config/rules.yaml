@@ -1,26 +1,5 @@
 version: 1
 
-default:
-  one_word_executable: true
-  collapse_veto: false
-  weak_market_gate:
-    max_picks: 1
-    min_score: 85
-    override:
-      enabled: true
-      theme_score_threshold: 80
-      min_score_by_mode:
-        one_to_two: 80
-        two_to_three: 79
-  second_line:
-    admission: strict
-    retreat_cap: watch_only
-    collapse_cap: watch_only
-  theme_score:
-    missing_dimension: exact_only
-  market_gate:
-    retreat_time_gate: "10:30"
-
 theme-first:
   one_word_executable: true
   collapse_veto: false
@@ -41,41 +20,3 @@ theme-first:
     missing_dimension: exact_only
   market_gate:
     retreat_time_gate: "10:30"
-
-v1.4:
-  one_word_executable: false
-  collapse_veto: true
-  weak_market_gate:
-    max_picks: 1
-    min_score: 85
-    override:
-      enabled: false
-  second_line:
-    admission: legacy
-    retreat_cap: no_list
-    collapse_cap: no_list
-  theme_score:
-    missing_dimension: zero
-  market_gate:
-    retreat_time_gate: "09:30"
-
-v1.6:
-  one_word_executable: true
-  collapse_veto: false
-  weak_market_gate:
-    max_picks: 1
-    min_score: 85
-    override:
-      enabled: true
-      theme_score_threshold: 80
-      min_score_by_mode:
-        one_to_two: 80
-        two_to_three: 79
-  second_line:
-    admission: legacy
-    retreat_cap: no_list
-    collapse_cap: no_list
-  theme_score:
-    missing_dimension: zero
-  market_gate:
-    retreat_time_gate: "09:30"

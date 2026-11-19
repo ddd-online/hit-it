@@ -2,7 +2,7 @@
 
 本细则的阈值都是默认值。用户提出个人阈值时优先使用，并在报告“口径”表里注明。
 
-机器可读预设位于 `config/rules.yaml`，通过 `--profile default|theme-first|v1.6|v1.4` 选择；默认 profile 是 `theme-first`，当前 `default` 与其等价，`v1.6` 保留第二梯队旧准入与旧缺数口径，`v1.4` 保留更早口径。配置缺键或 profile 未知时脚本停止。一字板、市场宽度否决、偏弱分数门槛、第二梯队上限和早盘退潮时点按 profile 取值，其他硬过滤与消息门槛不变。
+唯一机器可读 profile 是 `theme-first`，位于 `config/rules.yaml`。配置缺键、profile 名称不是 `theme-first` 或 profile 未知时脚本停止。一字板、市场宽度否决、偏弱分数门槛、第二梯队上限和早盘退潮时点按该 profile 取值，其他硬过滤与消息门槛不变。
 
 ## 1. 只处理两种模式
 

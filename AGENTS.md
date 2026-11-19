@@ -62,7 +62,7 @@ python D:\github\hit-it\limit-hit\scripts\save_limit_pool.py
 python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 ```
 
-默认行为使用 `theme-first`：一字板可排板口径开启、宽度崩塌只降为偏弱、强题材允许使用 80/79 结构分门槛。`default` 与 `theme-first` 当前等价；`v1.6` 保留第二梯队旧准入与旧缺数口径，`v1.4` 保留更早门槛。
+唯一 profile 为 `theme-first`：一字板可排板口径开启、宽度崩塌只降为偏弱、强题材允许使用 80/79 结构分门槛。其他 profile 名称必须报未知 profile 并停止。
 
 指定股票名称或代码做持仓审视：
 

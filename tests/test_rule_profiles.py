@@ -20,11 +20,11 @@ def load_module():
 
 
 class ProfileConfigTest(unittest.TestCase):
-    def test_default_profile_uses_theme_first_gates(self):
+    def test_theme_first_is_the_only_profile(self):
         module = load_module()
 
         self.assertEqual(
-            module.load_rule_profile("default"),
+            module.load_rule_profile("theme-first"),
             {
                 "one_word_executable": True,
                 "collapse_veto": False,
@@ -66,24 +66,13 @@ class ProfileConfigTest(unittest.TestCase):
             {"one_to_two": 80, "two_to_three": 79},
         )
 
-    def test_v14_profile_retains_legacy_gates(self):
+    def test_retired_profiles_are_rejected(self):
         module = load_module()
 
-        profile = module.load_rule_profile("v1.4")
-
-        self.assertFalse(profile["one_word_executable"])
-        self.assertTrue(profile["collapse_veto"])
-        self.assertFalse(profile["weak_market_gate"]["override"]["enabled"])
-
-    def test_v16_profile_keeps_legacy_second_line_and_score_behavior(self):
-        module = load_module()
-
-        profile = module.load_rule_profile("v1.6")
-
-        self.assertEqual(profile["second_line"]["admission"], "legacy")
-        self.assertEqual(profile["second_line"]["retreat_cap"], "no_list")
-        self.assertEqual(profile["theme_score"]["missing_dimension"], "zero")
-        self.assertEqual(profile["market_gate"]["retreat_time_gate"], "09:30")
+        for name in ("default", "v1.4", "v1.6"):
+            with self.subTest(profile=name):
+                with self.assertRaisesRegex(ValueError, "未知 profile"):
+                    module.load_rule_profile(name)
 
     def test_unknown_profile_is_rejected(self):
         module = load_module()
@@ -97,7 +86,7 @@ class ProfileConfigTest(unittest.TestCase):
             path = pathlib.Path(temp) / "rules.yaml"
             path.write_text(
                 "version: 1\n"
-                "default:\n"
+                "theme-first:\n"
                 "  one_word_executable: false\n"
                 "  weak_market_gate:\n"
                 "    max_picks: 1\n"
@@ -108,28 +97,10 @@ class ProfileConfigTest(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "collapse_veto"):
-                module.load_rule_profile("default", path)
+                module.load_rule_profile("theme-first", path)
 
 
 class OneWordGateTest(unittest.TestCase):
-    def test_default_profile_keeps_tradable_one_word_candidate(self):
-        module = load_module()
-        candidate = {
-            "code": "sh600001",
-            "amount_yi": 0.34,
-            "seal_fund_yi": 1.29,
-            "float_cap_yi": 10.0,
-        }
-
-        result = module.filter_one_word_candidates(
-            [candidate],
-            {"sh600001": True},
-            module.load_rule_profile("default"),
-        )
-
-        self.assertEqual(len(result["candidates"]), 1)
-        self.assertEqual(result["excluded_count"], 0)
-
     def test_theme_first_keeps_tradable_one_word_with_evidence(self):
         module = load_module()
         candidate = {
@@ -197,20 +168,6 @@ def weak_market_fixture():
 
 
 class MarketGateTest(unittest.TestCase):
-    def test_default_treats_breadth_collapse_as_weak_warning(self):
-        module = load_module()
-        fixture = weak_market_fixture()
-
-        gate = module.evaluate_market_gate(
-            **fixture,
-            profile=module.load_rule_profile("default"),
-        )
-
-        self.assertTrue(gate["breadth_collapse"])
-        self.assertFalse(gate["veto"])
-        self.assertEqual(gate["state"], "偏弱")
-        self.assertEqual(gate["action"], "max_one")
-
     def test_theme_first_keeps_breadth_collapse_as_weak_warning(self):
         module = load_module()
         fixture = weak_market_fixture()
@@ -364,17 +321,6 @@ class WeakMarketScoreGateTest(unittest.TestCase):
         fixture = weak_market_fixture()
         fixture["market"]["dt_count"] = 5
         return fixture
-
-    def test_default_uses_theme_first_override(self):
-        module = load_module()
-        fixture = self.weak_fixture()
-        profile = module.load_rule_profile("default")
-        gate = module.evaluate_market_gate(**fixture, profile=profile)
-
-        threshold = module.minimum_candidate_score(
-            theme_score=87, mode="one_to_two", market_gate=gate, profile=profile)
-
-        self.assertEqual(threshold, 80)
 
     def test_theme_first_uses_mode_threshold_for_strong_theme(self):
         module = load_module()

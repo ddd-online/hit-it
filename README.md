@@ -64,9 +64,7 @@ python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 ```
 
-`default` 与 `theme-first` 当前等价。该口径允许可核验且有板上成交的一字板进入比较，关闭仅由跌停家数触发的宽度崩塌否决，并在偏弱市场对题材强度 ≥80 的候选使用 80/79 结构分门槛。正常最高板天地板、跌停或行情缺失仍不可关闭。
-
-需要复现 v1.6.0 的第二梯队旧准入与旧缺数口径时使用 `--profile v1.6`；更早门槛使用 `--profile v1.4`。
+该唯一 profile 允许可核验且有板上成交的一字板进入比较，关闭仅由跌停家数触发的宽度崩塌否决，并在偏弱市场对题材强度 ≥80 的候选使用 80/79 结构分门槛。正常最高板天地板、跌停或行情缺失仍不可关闭。
 
 指定股票名称或代码做持仓审视：
 
@@ -171,7 +169,7 @@ python D:\github\hit-it\leader-hit\scripts\prepare_leader_candidates.py --codes 
 | `fetch_news.py` | 东方财富新闻与公告 |
 | `fetch_capital_flow.py` | 个股主力及超大单/大单/中单/小单资金流向 |
 
-规则 profile 固定从 `limit-hit/config/rules.yaml` 读取，默认是 `theme-first`；缺键或未知 profile 会直接报错。
+规则 profile 固定从 `limit-hit/config/rules.yaml` 读取，唯一可用值为 `theme-first`；缺键或其他 profile 名称会直接报错。
 | `fetch_quote.py` | 腾讯个股行情快照与日K |
 | `fallback_sources.py` | 腾讯、新浪、东财 F10 等备用数据源 |
 | `http_util.py` | 强制直连的公共网络层 |
