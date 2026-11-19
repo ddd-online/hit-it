@@ -18,7 +18,7 @@ python limit-hit/scripts/save_limit_pool.py --date YYYYMMDD
 
 ```bash
 python limit-hit/scripts/prepare_candidates.py --compact
-python limit-hit/scripts/prepare_candidates.py --profile theme-first --compact
+python limit-hit/scripts/prepare_candidates.py --compact
 ```
 
 单股持仓审视使用同一入口：
@@ -42,7 +42,7 @@ python limit-hit/scripts/prepare_candidates.py --stock 日发精机 --compact
 2. 读取 `report/涨停池/<previous_date>.json`；文件不存在、损坏或日期不符时停止运行，并提示先运行保存脚本；
 3. 批量取精确概念，并按概念与“东方系/羊字辈”等名称组聚合；
 4. 计算每组今日涨停、昨日涨停、晋级数、最高板和板数结构；
-5. 先保留当日 1/2 板，再执行沪深主板权限过滤；若昨日最高板停牌，继续排除与其同行业或共享精确概念的候选；最后按 profile 处理一字板。默认 `theme-first` 只保留板上成交额大于 0 且封单可核验的一字板。被这些硬过滤排除的股票不再请求个股指标；
+5. 先保留当日 1/2 板，再执行沪深主板权限过滤；若昨日最高板停牌，继续排除与其同行业或共享精确概念的候选；最后按内置规则处理一字板，只保留板上成交额大于 0 且封单可核验的一字板。被这些硬过滤排除的股票不再请求个股指标；
 6. 对剩余 1/2 板候选批量计算：
    - 首封/末封、开板次数、换手和封单占成交额；
    - 近 5/10/20 日涨幅、MA5/10/20；
@@ -50,7 +50,7 @@ python limit-hit/scripts/prepare_candidates.py --stock 日发精机 --compact
    - 获利盘、平均成本、90% 筹码集中度、筹码峰；
 7. 输出数据限制、异常和“一字板/尾盘首封/开板过多/换手过热”等事实标签；
 8. 输出一进二、二进三分模式晋级/高开统计，以及当前最高板和 2 板及以上家数；
-9. 读取 `config/rules.yaml`，输出 `rule_profile`、`market_gate` 和 `one_word_filter`，拆分宽度崩塌与高标崩塌；同时输出真实行情快照时间 `quote_time` 与 `market_gate.promotion_sample_time`。
+9. 使用脚本内置规则输出 `rules`、`market_gate` 和 `one_word_filter`，拆分宽度崩塌与高标崩塌；同时输出真实行情快照时间 `quote_time` 与 `market_gate.promotion_sample_time`。
 10. `09:25` 前按行情时间识别“开盘未撮合”，不得把 `open=0` 计算成低开；`09:25–10:30` 的低晋级率输出“退潮待确认”，10:30 后才确认退潮。
 
 单股模式在上述公共上下文之外额外完成：
@@ -99,7 +99,7 @@ python limit-hit/scripts/prepare_candidates.py --stock 日发精机 --compact
 - `data_date`、`previous_date`、`quote_date`、`quote_time`；
 - `board_permission`、`board_permission_excluded_count`：固定沪深主板权限及被排除的一/二板数量；
 - `suspension_filter`：停牌最高板、触发的行业/精确概念、连带排除数及逐股排除明细；
-- `rule_profile`：实际 profile 名称、三个原有规则开关及 `second_line`、`theme_score`、`market_gate` 新口径；
+- `rules`：脚本内置规则名称、三个规则开关及 `second_line`、`theme_score`、`market_gate` 口径；
 - `market_gate`：`breadth_collapse`、`leader_collapse`、`retreat`、`retreat_confirmed`、`promotion_sample_time`、情绪状态、动作和数量上限；
 - `one_word_filter`：一字板排除数和逐股原因；保留候选仍在 `candidates`；
 - `report_path`：由 `data_date` 生成的 `report/打板候选/YYYY-MM-DD.md`；

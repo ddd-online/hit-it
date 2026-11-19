@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import unittest
@@ -30,6 +31,16 @@ BOARDS_SPEC.loader.exec_module(BOARDS)
 
 
 class SelfContainedScriptsTest(unittest.TestCase):
+    def test_skill_files_contain_no_absolute_paths(self):
+        pattern = re.compile(
+            r"(?:[A-Za-z]:\\|/(?:Users|home)/|file://)", re.IGNORECASE)
+        for path in (
+            ROOT / "limit-hit" / "SKILL.md",
+            ROOT / "leader-hit" / "SKILL.md",
+        ):
+            with self.subTest(path=path):
+                self.assertIsNone(pattern.search(path.read_text(encoding="utf-8")))
+
     def test_open_url_uses_direct_opener_only(self):
         response = object()
         with mock.patch.object(

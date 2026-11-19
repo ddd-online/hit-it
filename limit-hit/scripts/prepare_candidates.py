@@ -13,6 +13,7 @@
 
 import argparse
 import collections
+import copy
 import json
 import re
 import subprocess
@@ -25,6 +26,33 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 CN_TZ = timezone(timedelta(hours=8))
 BOARD_PERMISSION = "沪深主板"
+RULES = {
+    "one_word_executable": True,
+    "collapse_veto": False,
+    "weak_market_gate": {
+        "max_picks": 1,
+        "min_score": 85,
+        "override": {
+            "enabled": True,
+            "theme_score_threshold": 80,
+            "min_score_by_mode": {
+                "one_to_two": 80,
+                "two_to_three": 79,
+            },
+        },
+    },
+    "second_line": {
+        "admission": "strict",
+        "retreat_cap": "watch_only",
+        "collapse_cap": "watch_only",
+    },
+    "theme_score": {
+        "missing_dimension": "exact_only",
+    },
+    "market_gate": {
+        "retreat_time_gate": "10:30",
+    },
+}
 TENCENT_SUGGEST_URL = "https://smartbox.gtimg.cn/s3/?q={query}&t=all"
 EASTMONEY_SUGGEST_URL = (
     "https://searchapi.eastmoney.com/api/suggest/get"
@@ -36,7 +64,6 @@ STOCK_CODE_RE = re.compile(
 sys.path.insert(0, str(SCRIPT_DIR))
 
 import http_util  # noqa: E402 与脚本同目录的直连网络层
-import rule_profiles  # noqa: E402
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -698,8 +725,212 @@ def mode_feedback(previous_rows, current_data):
     }
 
 
-def build_payload(stock_query=None, profile="theme-first"):
-    rule_profile = rule_profiles.load_rule_profile(profile)
+def _rule_number(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _one_word_evidence(row, is_one_word):
+    amount = _rule_number(row.get("amount_yi"))
+    seal_fund = _rule_number(row.get("seal_fund_yi"))
+    float_cap = _rule_number(row.get("float_cap_yi"))
+    seal_ratio = (
+        round(seal_fund * 100.0 / amount, 2)
+        if seal_fund is not None and amount else None
+    )
+    seal_over_float = (
+        round(seal_fund * 100.0 / float_cap, 2)
+        if seal_fund is not None and float_cap else None
+    )
+    if amount is None:
+        fill_probability = None
+    elif amount >= 0.5 and seal_ratio is not None and seal_ratio <= 100:
+        fill_probability = "高"
+    elif amount >= 0.2 and seal_ratio is not None and seal_ratio <= 200:
+        fill_probability = "中"
+    else:
+        fill_probability = "低"
+    return {
+        "one_word": bool(is_one_word),
+        "board_amount_yi": amount,
+        "seal_fund_yi": seal_fund,
+        "seal_fund_ratio_pct": seal_ratio,
+        "seal_fund_over_float_pct": seal_over_float,
+        "fill_probability": fill_probability,
+    }
+
+
+def filter_one_word_candidates(candidates, one_word_codes):
+    """按内置规则判断一字板是否进入候选；非一字板原样保留。"""
+    kept = []
+    excluded = []
+    for source in candidates:
+        row = dict(source)
+        evidence = _one_word_evidence(row, one_word_codes.get(row.get("code")))
+        row.update(evidence)
+        if not evidence["one_word"]:
+            kept.append(row)
+            continue
+        reason = None
+        if not RULES["one_word_executable"]:
+            reason = "当前口径下一字板不可执行"
+        elif evidence["board_amount_yi"] is None:
+            reason = "板上成交额未获取"
+        elif evidence["board_amount_yi"] <= 0:
+            reason = "板上成交额为0"
+        elif evidence["seal_fund_yi"] is None:
+            reason = "封单未获取"
+        elif evidence["seal_fund_yi"] <= 0:
+            reason = "封单为0或封单撤除"
+        if reason:
+            excluded.append({
+                "code": row.get("code"),
+                "name": row.get("name"),
+                "reason": reason,
+            })
+        else:
+            kept.append(row)
+    return {
+        "candidates": kept,
+        "excluded_count": len(excluded),
+        "excluded": excluded,
+    }
+
+
+def _leader_collapse(yesterday_high):
+    for stock in (yesterday_high or {}).get("stocks") or []:
+        if stock.get("suspended"):
+            continue
+        close_state = stock.get("close_state")
+        today_pct = _rule_number(stock.get("today_pct"))
+        if close_state in ("天地板", "跌停") or (
+                today_pct is not None and today_pct <= -9.5):
+            return True
+        if (
+            stock.get("today_open") is None
+            and today_pct is None
+            and close_state in (None, "-", "未获取")
+        ):
+            return True
+    return False
+
+
+def evaluate_market_gate(market, promotion_rate_pct, yesterday_open,
+                         yesterday_high, previous_max_board,
+                         promotion_sample_time=None):
+    """用内置规则拆分市场宽度与最高板风险。"""
+    market = market or {}
+    zt_count = _rule_number(market.get("zt_count"))
+    dt_count = _rule_number(market.get("dt_count"))
+    zb_count = _rule_number(market.get("zb_count"))
+    missing_counts = None in (zt_count, dt_count, zb_count)
+    promotion = _rule_number(promotion_rate_pct)
+    break_rate = (
+        round(zb_count * 100.0 / (zt_count + zb_count), 2)
+        if zb_count is not None and zt_count is not None and zt_count + zb_count
+        else None
+    )
+    breadth_collapse = bool(
+        zt_count is not None
+        and dt_count is not None
+        and dt_count >= 20
+        and dt_count >= zt_count / 3.0
+    )
+    leader_collapse = _leader_collapse(yesterday_high)
+    retreat = bool(
+        previous_max_board is not None
+        and market.get("max_board") is not None
+        and market["max_board"] < previous_max_board
+        and promotion is not None
+        and promotion < 15
+    )
+    sample_clock = None
+    if promotion_sample_time:
+        try:
+            sample_clock = datetime.strptime(
+                str(promotion_sample_time), "%Y-%m-%d %H:%M:%S").time()
+        except ValueError:
+            sample_clock = None
+    opening_unmatched = bool(
+        sample_clock
+        and sample_clock < datetime.strptime("09:25:00", "%H:%M:%S").time()
+    )
+    retreat_confirmed = retreat
+    if retreat and sample_clock:
+        gate_time = datetime.strptime(
+            RULES["market_gate"]["retreat_time_gate"], "%H:%M").time()
+        retreat_confirmed = sample_clock >= gate_time
+    weak = bool(
+        (promotion is not None and 15 <= promotion < 25)
+        or (break_rate is not None and 35 <= break_rate <= 45)
+    )
+    opening = yesterday_open or {}
+    up_open = _rule_number(opening.get("up_open")) or 0
+    down_open = _rule_number(opening.get("down_open")) or 0
+    collective_low_open = bool(
+        down_open > up_open
+        or ((_rule_number(opening.get("avg_gap_pct")) or 0) < 0)
+    )
+
+    if leader_collapse:
+        state, action, max_picks = "崩塌", "observe_only", 0
+    elif missing_counts:
+        state, action, max_picks = "数据未获取", "no_conclusion", 0
+    elif opening_unmatched:
+        state, action, max_picks = "开盘未撮合", "no_conclusion", 0
+    elif retreat and not retreat_confirmed:
+        state, action, max_picks = "退潮待确认", "max_one", 1
+    elif retreat:
+        state, action, max_picks = "退潮", "no_trade", 0
+    elif breadth_collapse and RULES["collapse_veto"]:
+        state, action, max_picks = "崩塌", "no_trade", 0
+    elif weak or breadth_collapse or collective_low_open:
+        state, action, max_picks = "偏弱", "max_one", 1
+    else:
+        state, action, max_picks = "允许", "normal", None
+    return {
+        "state": state,
+        "action": action,
+        "breadth_collapse": breadth_collapse,
+        "leader_collapse": leader_collapse,
+        "retreat": retreat,
+        "retreat_confirmed": retreat_confirmed,
+        "opening_unmatched": opening_unmatched,
+        "weak": weak,
+        "collective_low_open": collective_low_open,
+        "break_rate_pct": break_rate,
+        "promotion_rate_pct": promotion,
+        "promotion_sample_time": promotion_sample_time,
+        "veto": action in ("no_trade", "observe_only", "no_conclusion"),
+        "max_picks": max_picks,
+        "weak_market_gate": copy.deepcopy(RULES["weak_market_gate"]),
+    }
+
+
+def minimum_candidate_score(theme_score, mode, market_gate):
+    """返回当前市场和题材强度下的候选结构分门槛。"""
+    mode_gate = {
+        "one_to_two": 80,
+        "two_to_three": 79,
+    }
+    if mode not in mode_gate:
+        raise ValueError("未知候选模式：{}".format(mode))
+    if market_gate["action"] in ("no_trade", "observe_only", "no_conclusion"):
+        return None
+    if market_gate["state"] == "退潮待确认":
+        return 85
+    if market_gate["state"] != "偏弱":
+        return mode_gate[mode]
+    weak_gate = RULES["weak_market_gate"]
+    override = weak_gate["override"]
+    if theme_score >= override["theme_score_threshold"]:
+        return override["min_score_by_mode"][mode]
+    return weak_gate["min_score"]
+
+
+def build_payload(stock_query=None):
     snapshot = datetime.now(CN_TZ)
     stock = resolve_stock_query(stock_query) if stock_query else None
     if stock and not is_mainboard_code(stock["code"]):
@@ -748,10 +979,9 @@ def build_payload(stock_query=None, profile="theme-first"):
         row for row in permitted_candidates
         if row["code"] not in suspended_excluded_codes
     ]
-    one_word_filter = rule_profiles.filter_one_word_candidates(
+    one_word_filter = filter_one_word_candidates(
         permitted_after_suspension,
         current.get("one_word") or {},
-        rule_profile,
     )
     candidates = one_word_filter["candidates"]
     one_word_audit = {
@@ -866,7 +1096,7 @@ def build_payload(stock_query=None, profile="theme-first"):
         if eligible_count and performance.get("promote_count") is not None
         else None
     )
-    market_gate = rule_profiles.evaluate_market_gate(
+    market_gate = evaluate_market_gate(
         market=current.get("overview"),
         promotion_rate_pct=promotion_rate,
         yesterday_open=(current.get("yesterday_open_close") or {}).get("overall"),
@@ -875,7 +1105,6 @@ def build_payload(stock_query=None, profile="theme-first"):
             current.get("prev_max_board")
             or (previous_pool.get("summary") or {}).get("max_board")
         ),
-        profile=rule_profile,
         promotion_sample_time=current.get("quote_time"),
     )
 
@@ -889,7 +1118,7 @@ def build_payload(stock_query=None, profile="theme-first"):
         "previous_date": previous_date,
         "quote_date": current.get("quote_date"),
         "quote_time": current.get("quote_time"),
-        "rule_profile": {"name": profile, **rule_profile},
+        "rules": copy.deepcopy(RULES),
         "market_gate": market_gate,
         "board_permission": BOARD_PERMISSION,
         "board_permission_excluded_count": board_permission_excluded,
@@ -1094,7 +1323,7 @@ def build_compact_payload(payload, theme_limit=30):
         "data_date": payload.get("data_date"),
         "quote_date": payload.get("quote_date"),
         "quote_time": payload.get("quote_time"),
-        "rule_profile": payload.get("rule_profile"),
+        "rules": payload.get("rules"),
         "market_gate": payload.get("market_gate"),
         "previous_date": payload.get("previous_date"),
         "board_permission": payload.get("board_permission"),
@@ -1182,10 +1411,10 @@ def print_text(payload):
     print("板块权限：{}（权限外 1/2 板排除 {} 只）".format(
         payload.get("board_permission"),
         payload.get("board_permission_excluded_count")))
-    rule_profile = payload.get("rule_profile") or {}
+    rules = payload.get("rules") or {}
     gate = payload.get("market_gate") or {}
-    print("口径：{} · 市场门槛 {} / {} · 最多 {} 只".format(
-        rule_profile.get("name"), gate.get("state"), gate.get("action"),
+    print("口径：内置规则 · 市场门槛 {} / {} · 最多 {} 只".format(
+        gate.get("state"), gate.get("action"),
         "-" if gate.get("max_picks") is None else gate.get("max_picks")))
     one_word_filter = payload.get("one_word_filter") or {}
     print("一字板过滤：排除 {} 只".format(
@@ -1265,13 +1494,11 @@ def print_text(payload):
 def main():
     ap = argparse.ArgumentParser(description="limit-hit 候选上下文预计算")
     ap.add_argument("--stock", help="单股名称或代码；输出持仓审视事实，不要求当日涨停")
-    ap.add_argument("--profile", default="theme-first",
-                    help="唯一规则预设 theme-first")
     output = ap.add_mutually_exclusive_group()
     output.add_argument("--json", action="store_true", help="输出完整 JSON，供审计和调试")
     output.add_argument("--compact", action="store_true", help="输出模型友好的单行紧凑 JSON")
     args = ap.parse_args()
-    payload = build_payload(stock_query=args.stock, profile=args.profile)
+    payload = build_payload(stock_query=args.stock)
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     elif args.compact:

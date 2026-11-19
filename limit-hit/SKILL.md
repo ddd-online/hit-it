@@ -43,7 +43,7 @@ description: 筛选 A 股一进二、二进三打板候选，研判板块内未�
 每个交易日收盘后，在当前交易工作区保存当日涨停池：
 
 ```bash
-python D:\github\hit-it\limit-hit\scripts\save_limit_pool.py
+python limit-hit/scripts/save_limit_pool.py
 ```
 
 运行 SKILL 时再拉取当日实时涨停池并读取已保存的昨日涨停池：
@@ -52,13 +52,7 @@ python D:\github\hit-it\limit-hit\scripts\save_limit_pool.py
 python limit-hit/scripts/prepare_candidates.py --compact
 ```
 
-默认使用 `theme-first`，即“结构分化、强梯队优先”口径：
-
-```bash
-python limit-hit/scripts/prepare_candidates.py --compact
-```
-
-唯一可用 profile 是 `theme-first`；显式传入其他名称必须报“未知 profile”并停止，不得回退到默认口径。
+规则常量固定内聚在 `prepare_candidates.py`，采用“结构分化、强梯队优先”口径；脚本不读取规则配置文件，也不接受 `--profile` 入参。
 
 保存脚本默认取最近已完成交易日，写入当前目录 `report/涨停池/<date>.json`；需要补某日时使用 `--date YYYYMMDD`。`prepare_candidates.py` 一次性完成当日实拉、昨日文件读取、概念聚合、梯队统计和候选指标计算，不自动生成涨停池。模型读取输出，不重复手工拉取或计算这些字段。具体边界见 [references/runtime-context.md](references/runtime-context.md)。
 
@@ -116,14 +110,14 @@ python limit-hit/scripts/prepare_candidates.py --compact
 | 连板高度 | 最高板、2 板及以上家数、高度较昨日变化 |
 | 分模式反馈 | 昨日一进二晋级率/高开率、二进三晋级率/高开率 |
 
-同时按 `$limit-judge` 的口径做两项硬检查：
+同时做两项本地硬检查：
 
 1. **集体开盘分布**：昨日涨停样本今天有多少高开、平开、低开，平均/中位高开幅度；单只股票不作为情绪结论。停牌股单列，不计入高开/平开/低开、平均/中位开盘、平均收盘或晋级率分母。
 2. **昨日最高板**：正常交易的最高板若今天天地板、跌停或行情缺失无法判断，本报告只能写“只观察”。停牌最高板不按天地板、跌停或行情缺失处理，也不触发该条全市场只观察规则；多只最高板中只忽略其中停牌者。
 
 情绪处于退潮或高标集体负反馈时，降低推荐数量或直接输出“今日无可打板”；不得因为某个题材好看而绕过情绪门槛。09:25 前开盘未撮合时不得计算集体开盘，`market_gate.state=开盘未撮合`、`action=no_conclusion`，不得给可打板或第二梯队候选；09:25–10:30 晋级率过低只能写“退潮待确认”，10:30 后才确认退潮。该早盘缓冲不放宽高标崩塌和已启用的宽度否决。
 
-`market_gate.breadth_collapse` 只表示跌停家数宽度条件；默认 `collapse_veto=false`，它只作风险提示并降为偏弱；显式启用否决时才停止输出。`market_gate.leader_collapse` 是正常交易最高板天地板、跌停或行情缺失，任何 profile 都不能关闭。
+`market_gate.breadth_collapse` 只表示跌停家数宽度条件；固定规则 `collapse_veto=false`，它只作风险提示并降为偏弱。`market_gate.leader_collapse` 是正常交易最高板天地板、跌停或行情缺失，任何情况下都不能关闭。
 
 ### 4. 先做硬过滤，再深查
 
@@ -132,11 +126,11 @@ python limit-hit/scripts/prepare_candidates.py --compact
 - 当日 `board_count` 为 1 或 2；板数未获取则排除；
 - 沪深主板、非 ST、非退市整理、非停牌；
 - 若昨日最高板停牌，排除与其同行业或共享至少一个精确概念的当日 1/2 板候选；`名称组:*` 不参与匹配；
-- 默认 `one_word_executable=true`，一字板只有在板上成交额大于 0、封单未撤且数据可核验时才进入候选；未启用该口径时，全天一字只列“强度证明”。一字板不获得洗盘加分，必须输出 `one_word=true`、`board_amount_yi`、`seal_fund_yi`、`seal_fund_ratio_pct`、`seal_fund_over_float_pct`、`fill_probability`；
+- 固定 `one_word_executable=true`，一字板只有在板上成交额大于 0、封单未撤且数据可核验时才进入候选。一字板不获得洗盘加分，必须输出 `one_word=true`、`board_amount_yi`、`seal_fund_yi`、`seal_fund_ratio_pct`、`seal_fund_over_float_pct`、`fill_probability`；
 - 未出现财务造假立案、重大减持正在进行、退市风险、监管处罚、业绩暴雷等可核验负事件；
 - 最新题材催化与个股消息通过网页搜索核验，并在报告中给出标题、来源、发布时间、链接。
 
-脚本已先完成 1/2 板筛选、沪深主板权限过滤、停牌最高板同行业/精确概念过滤和 profile 对应的一字板过滤，再对剩余候选计算封板、量比、开盘/最低价差、历史涨跌、均线和筹码字段，并给出 `metric_quality`。排除数分别见 `board_permission_excluded_count`、`suspension_filter.excluded_count` 与 `one_word_filter.excluded_count`，不得合并。`degraded` 表示换手率与筹码使用近似值，只能作为辅助证据，不能据此认定“筹码结构优秀”。模型筛出每个题材的 1–2 只后，只补取消息与资金：
+脚本已先完成 1/2 板筛选、沪深主板权限过滤、停牌最高板同行业/精确概念过滤和内置规则的一字板过滤，再对剩余候选计算封板、量比、开盘/最低价差、历史涨跌、均线和筹码字段，并给出 `metric_quality`。排除数分别见 `board_permission_excluded_count`、`suspension_filter.excluded_count` 与 `one_word_filter.excluded_count`，不得合并。`degraded` 表示换手率与筹码使用近似值，只能作为辅助证据，不能据此认定“筹码结构优秀”。模型筛出每个题材的 1–2 只后，只补取消息与资金：
 
 - `scripts/fetch_news.py <code> --news 10 --ann 10`：最新催化、澄清、减持、诉讼、处罚；
 - `scripts/fetch_capital_flow.py <code>`：主力资金；
@@ -158,7 +152,7 @@ A 股短线默认不把营收、净利、负债率、估值作为主要加减分
 
 按选择细则给题材强度和个股结构分。默认题材强度须 ≥80；一进二结构分须 ≥80，二进三须 ≥79；消息硬门槛必须同时通过。先按题材强度排序，再在题材内选分最高的一只；同一代码不得因多个概念重复出现。
 
-偏弱市场只保留 1 只。默认 `theme-first` 在候选所属题材强度 ≥80 时，把门槛改为一进二 ≥80、二进三 ≥79；题材 <80 仍按 85 分处理，数量上限始终为 1。
+偏弱市场只保留 1 只。固定规则在候选所属题材强度 ≥80 时，把门槛改为一进二 ≥80、二进三 ≥79；题材 <80 仍按 85 分处理，数量上限始终为 1。
 
 打板名单最终状态只能是：
 
@@ -172,7 +166,7 @@ A 股短线默认不把营收、净利、负债率、估值作为主要加减分
 
 执行语义固定为：**盘中在首次封板或回封时排板/买入，持有到次日开盘卖出**。如果候选已经封死且没有开板，不能把“推荐”写成“已买到”；只有实际排板成交或回封成交才算执行。次日高开达到目标后默认开盘离场，低开按失效条件处理。快照越晚，越应使用 `minutes_since_first_seal`、`minutes_since_last_seal` 和 `is_reseal` 区分“刚封/刚回封”与“封板已久的旧票”。
 
-次日高开评估沿用 `$limit-judge` 口径：高开幅度按“次日开盘 ÷ 当日收盘 - 1”计算，竞价量占比按“次日竞价成交额 ÷ 当日全天成交额”计算。D 日只写观察条件，不用盘中全天成交额伪造次日竞价数据；盘中未收盘时，分母标“待收盘确认”。
+次日高开评估采用固定口径：高开幅度按“次日开盘 ÷ 当日收盘 - 1”计算，竞价量占比按“次日竞价成交额 ÷ 当日全天成交额”计算。D 日只写观察条件，不用盘中全天成交额伪造次日竞价数据；盘中未收盘时，分母标“待收盘确认”。
 
 ### 7. 生成报告
 
@@ -180,7 +174,7 @@ A 股短线默认不把营收、净利、负债率、估值作为主要加减分
 
 报告必须保留「上游复用」「昨日涨停今日集体开盘」「次日 9:25 开盘退出复核」三节，并单列停牌最高板过滤审计，让报告能看出昨日涨停池文件用了什么、开盘是否已撮合、停牌与行情缺失如何区分、最高板硬规则是否通过、连带排除了哪些候选，以及次日竞价按什么分母复核。`09:25` 前整节写“开盘价未撮合”，不得出现 `-100%`。
 
-报告必须回显 `rule_profile.name`、`one_word_executable`、`collapse_veto`、偏弱门槛、第二梯队准入和退潮上限实际取值。必须分别列出打板候选和第二梯队研判；第二梯队不能套用打板结构分，也不能把技术分当成交易结论。使用非默认 profile 时增加「用户口径覆盖」段，并写明不应用覆盖时的结果。
+报告必须回显内置的 `one_word_executable`、`collapse_veto`、偏弱门槛、第二梯队准入和退潮上限实际取值。必须分别列出打板候选和第二梯队研判；第二梯队不能套用打板结构分，也不能把技术分当成交易结论。用户明确覆盖个人阈值时增加「用户口径覆盖」段，并写明不应用覆盖时的结果。
 
 题材强度仍由模型根据原始事实研判。报告必须写 `强度分 X（exact/partial/unavailable）`、缺失维度和覆盖率；只有 `exact` 能通过 80/85 硬门槛，`partial` 只能“只观察”，`unavailable` 禁止候选。`partial` 数值可以展示，但不得按剩余满分归一后放行。
 
@@ -207,7 +201,7 @@ A 股短线默认不把营收、净利、负债率、估值作为主要加减分
 python limit-hit/scripts/prepare_candidates.py --stock <名称或代码> --compact
 ```
 
-单股模式同样只使用 `theme-first`。
+单股模式同样使用脚本内置固定规则。
 
 - 名称必须唯一精确匹配；找不到、重名或模糊命中多只时停止，要求用户提供代码，不猜股票。
 - 只支持沪深主板。创业板、科创板和北交所直接提示超出范围。
@@ -270,6 +264,4 @@ report/个股审视/<data_date>_<code>.md
 - [references/sector-second-line.md](references/sector-second-line.md)：未涨停第二梯队的数据采集、证据权重、模型研判与执行边界；审视第二梯队时读。
 - [references/report-template.md](references/report-template.md)：固定报告骨架；落盘前读。
 - [references/mobile-summary.md](references/mobile-summary.md)：报告生成后的手机端核心摘要格式；最终回复前读。
-- `$limit-judge`：参考集体高开、竞价量占比和最高板硬规则；本 SKILL 不调用它。
-
-本技能自带运行期取数脚本，全部位于 `scripts/`，不依赖其他 skill 或 `market-data` 目录。
+本技能自带运行期取数脚本，全部位于 `scripts/`。

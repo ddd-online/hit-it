@@ -6,7 +6,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from unittest import mock
 
@@ -428,19 +428,17 @@ class StockReviewTest(unittest.TestCase):
                 redirect_stdout(io.StringIO()):
             MODULE.main()
         build_payload.assert_called_once_with(
-            stock_query="日发精机", profile="theme-first")
+            stock_query="日发精机")
 
-    def test_profile_cli_passes_profile_to_builder(self):
+    def test_profile_cli_option_is_removed(self):
         with mock.patch.object(
-                MODULE, "build_payload", return_value={}) as build_payload, \
-                mock.patch.object(
-                    sys, "argv",
-                    ["prepare_candidates.py", "--profile", "theme-first",
-                     "--json"]), \
-                redirect_stdout(io.StringIO()):
-            MODULE.main()
-        build_payload.assert_called_once_with(
-            stock_query=None, profile="theme-first")
+                sys, "argv",
+                ["prepare_candidates.py", "--profile", "legacy"]):
+            with redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    MODULE.main()
+
+        self.assertEqual(raised.exception.code, 2)
 
     def test_stock_review_rejects_non_mainboard_code(self):
         with self.assertRaisesRegex(RuntimeError, "仅支持沪深主板"):
@@ -480,10 +478,10 @@ class CompactPayloadTest(unittest.TestCase):
         self.assertEqual(candidate["chips"]["profit_ratio_pct"], 88.89)
         self.assertNotIn("metrics", candidate)
 
-    def test_compact_payload_exposes_rule_profile_and_market_gate(self):
+    def test_compact_payload_exposes_hardcoded_rules_and_market_gate(self):
         payload = {
             "quote_time": "2026-11-19 09:42:00",
-            "rule_profile": {"name": "theme-first"},
+            "rules": {"one_word_executable": True},
             "market_gate": {"state": "偏弱", "action": "max_one"},
             "themes": [],
             "candidates": [],
@@ -491,12 +489,12 @@ class CompactPayloadTest(unittest.TestCase):
 
         compact = MODULE.build_compact_payload(payload)
 
-        self.assertEqual(compact["rule_profile"]["name"], "theme-first")
+        self.assertTrue(compact["rules"]["one_word_executable"])
         self.assertEqual(compact["market_gate"]["action"], "max_one")
         self.assertEqual(compact["quote_time"], "2026-11-19 09:42:00")
 
 
-class ProfilePipelineTest(unittest.TestCase):
+class RulePipelineTest(unittest.TestCase):
     def test_one_word_filter_changes_candidates_and_theme_codes(self):
         current = {
             "base_date": "20261118",
@@ -541,7 +539,7 @@ class ProfilePipelineTest(unittest.TestCase):
                 }), encoding="utf-8")
                 with mock.patch.object(
                         MODULE, "run_json", side_effect=fake_run_json):
-                    result = MODULE.build_payload(profile="theme-first")
+                    result = MODULE.build_payload()
             finally:
                 os.chdir(old_cwd)
 

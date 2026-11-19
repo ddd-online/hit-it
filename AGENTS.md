@@ -21,7 +21,6 @@ hit-it/
 ├── limit-hit/
 │   ├── SKILL.md
 │   ├── agents/openai.yaml
-│   ├── config/rules.yaml
 │   ├── references/
 │   └── scripts/
 ├── leader-hit/
@@ -62,7 +61,7 @@ python D:\github\hit-it\limit-hit\scripts\save_limit_pool.py
 python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --compact
 ```
 
-唯一 profile 为 `theme-first`：一字板可排板口径开启、宽度崩塌只降为偏弱、强题材允许使用 80/79 结构分门槛。其他 profile 名称必须报未知 profile 并停止。
+规则常量固定内聚在 `limit-hit/scripts/prepare_candidates.py`：一字板可排板、宽度崩塌只降为偏弱、强题材使用 80/79 结构分门槛。脚本不读取规则配置文件，也不接受 profile 入参。
 
 指定股票名称或代码做持仓审视：
 
@@ -79,7 +78,7 @@ python D:\github\hit-it\limit-hit\scripts\prepare_candidates.py --stock 日发�
 
 - 当日涨停必须由 `limit-hit/scripts/fetch_limit_up.py --current-only --json` 现场获取，不能用旧报告冒充当日。
 - 先运行 `prepare_candidates.py --compact`，模型不得重复手工计算脚本已经给出的涨停数、晋级数、板数、题材聚合和候选指标；需要审计原始字段时改用 `--json`。
-- 规则开关从 `limit-hit/config/rules.yaml` 读取；未知 profile 或缺少必需键时停止。`collapse_veto=false` 只能关闭宽度崩塌，不得关闭正常最高板天地板、跌停或行情缺失的高标规则。
+- 规则开关内置于 `prepare_candidates.py`；`collapse_veto=false` 只能关闭宽度崩塌，不得关闭正常最高板天地板、跌停或行情缺失的高标规则。
 - 单股审视先运行 `prepare_candidates.py --stock <名称或代码> --compact`；名称必须唯一精确匹配，不得猜股票。非沪深主板直接提示超出范围。
 - 单股不要求当日涨停，也不把不涨停判定为“排除”；必须同时检查价格承接、量能、筹码、题材扩散、消息和市场情绪。
 - 单股盘中量比和换手是截至快照的部分日数据，必须标“盘中部分量”；不得冒充全天量能。
