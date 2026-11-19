@@ -876,6 +876,7 @@ def build_payload(stock_query=None, profile="theme-first"):
             or (previous_pool.get("summary") or {}).get("max_board")
         ),
         profile=rule_profile,
+        promotion_sample_time=current.get("quote_time"),
     )
 
     return {
@@ -887,6 +888,7 @@ def build_payload(stock_query=None, profile="theme-first"):
         ),
         "previous_date": previous_date,
         "quote_date": current.get("quote_date"),
+        "quote_time": current.get("quote_time"),
         "rule_profile": {"name": profile, **rule_profile},
         "market_gate": market_gate,
         "board_permission": BOARD_PERMISSION,
@@ -1091,6 +1093,7 @@ def build_compact_payload(payload, theme_limit=30):
         "generated_at": payload.get("generated_at"),
         "data_date": payload.get("data_date"),
         "quote_date": payload.get("quote_date"),
+        "quote_time": payload.get("quote_time"),
         "rule_profile": payload.get("rule_profile"),
         "market_gate": payload.get("market_gate"),
         "previous_date": payload.get("previous_date"),
@@ -1171,8 +1174,9 @@ def print_text(payload):
         return
 
     print("=" * 112)
-    print("limit-hit 候选上下文 · {} · 行情 {} · 快照 {}".format(
+    print("limit-hit 候选上下文 · {} · 行情 {} {} · 快照 {}".format(
         payload["data_date"], payload.get("quote_date") or "-",
+        payload.get("quote_time") or "-",
         payload.get("generated_at") or "-"))
     print("报告文件：{}".format(payload.get("report_path") or "-"))
     print("板块权限：{}（权限外 1/2 板排除 {} 只）".format(
@@ -1209,9 +1213,13 @@ def print_text(payload):
         market.get("max_board"), market.get("two_plus_count"),
         json.dumps(market.get("board_counts") or {}, ensure_ascii=False)))
     opening = payload.get("yesterday_open") or {}
-    print("昨日涨停今日开盘：高开 {} / 平开 {} / 低开 {} / 平均 {}%".format(
-        opening.get("up_open"), opening.get("flat_open"),
-        opening.get("down_open"), opening.get("avg_gap_pct")))
+    if opening.get("status") == "未撮合":
+        print("昨日涨停今日开盘：未撮合（本节不适用）")
+    else:
+        print("昨日涨停今日开盘：{} / 高开 {} / 平开 {} / 低开 {} / 平均 {}%".format(
+            opening.get("status") or "未获取",
+            opening.get("up_open"), opening.get("flat_open"),
+            opening.get("down_open"), opening.get("avg_gap_pct")))
     feedback = payload.get("mode_feedback") or {}
     for key in ("one_to_two", "two_to_three"):
         row = feedback.get(key) or {}

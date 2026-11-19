@@ -162,6 +162,26 @@ class PoolFieldTruthTest(unittest.TestCase):
             "20261113",
         )
 
+    def test_payload_preserves_latest_quote_sample_time(self):
+        payload = LIMIT_UP.build_json_payload(
+            "20261113", "20261112", "20261113",
+            {"base_available": True, "prev_available": True}, [],
+            [], [], [], [], [], [], None,
+            {
+                "600001": {
+                    "quote_date": "20261113",
+                    "quote_time": "20261113103000",
+                },
+                "600002": {
+                    "quote_date": "20261113",
+                    "quote_time": "20261113104201",
+                },
+            },
+            {},
+        )
+
+        self.assertEqual(payload["quote_time"], "2026-11-13 10:42:01")
+
 
 class FeedbackStatsTest(unittest.TestCase):
     def test_mode_feedback_groups_yesterday_board_count(self):

@@ -219,6 +219,14 @@ class SimulationTest(unittest.TestCase):
 
 
 class ReportTest(unittest.TestCase):
+    def test_limitations_state_v17_diffusion_admission_is_not_backtested(self):
+        limitations = MODULE.backtest_limitations()
+
+        self.assertTrue(any(
+            "无法严格验证 v1.7" in text and "D" in text
+            for text in limitations
+        ))
+
     def test_time_report_contains_both_groups_and_limits(self):
         result = {
             "time": "09:40:00",

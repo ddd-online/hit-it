@@ -10,10 +10,10 @@
                                      [--include-st] [--source auto|eastmoney|f10]
                                      [--json|--compact]
 
-输出: 指定板块（BK 代码）的成分股行情榜——按所选排序返回 Top N 成分股，含现价、当日涨跌幅、
+输出: 指定板块（BK 代码）的成分股行情榜——按所选排序返回 Top N 展示行，含现价、当日涨跌幅、
 近5日/近10日累计涨跌幅、换手、量比、成交额、振幅、PE、流通/总市值、主力净流入、行业，
-并标注“涨停≈”；带换手/涨幅/市值过滤时自动多翻页补齐候选；表头附板块当日/近5日/近10日涨幅、
-领涨股与涨跌家数。--compact 只输出扩散摘要与涨幅前 10 名，不产生缓存文件。
+并标注“涨停≈”；扩散统计扫描完整成分股，`--top` 只限制展示。表头附板块当日/近5日/近10日涨幅、
+领涨股与涨跌家数。--compact 只输出完整扩散摘要与涨幅前 10 名，不产生缓存文件。
 
 数据源: 东方财富板块行情中心（push2 clist，fs=b:BKxxxx）优先；该接口不可用时自动切换备用源——
 成分股名单取东财 F10「所属板块」（按 BK 代码匹配，代码口径）、个股行情取腾讯快照、
@@ -69,7 +69,7 @@ BOARD_FIELDS = (
 )
 
 STOCK_FIELDS = (
-    "f2,f3,f6,f7,f8,f9,f10,f12,f13,f14,f15,f20,f21,f62,f100,f109,f124,f160"
+    "f2,f3,f6,f7,f8,f9,f10,f12,f13,f14,f15,f18,f20,f21,f62,f100,f109,f124,f160"
 )
 
 SOURCE_ORDER = {
@@ -159,7 +159,9 @@ def to_sec_code(market, digits):
     return "sz" + digits
 
 
-def limit_threshold(digits):
+def limit_threshold(digits, name=""):
+    if "ST" in str(name).upper():
+        return 5.0
     if digits[:2] in ("30", "68"):
         return 20.0
     if digits[:2] == "92" or digits[0] in ("4", "8"):
@@ -167,11 +169,25 @@ def limit_threshold(digits):
     return 10.0
 
 
-def is_limit_up(price, high, change_pct, digits):
-    threshold = limit_threshold(digits)
+def is_limit_up(price, high, change_pct, digits, name=""):
+    threshold = limit_threshold(digits, name)
     if price is None or high is None or high <= 0 or change_pct is None:
         return False
     return price >= high - 1e-9 and change_pct >= threshold - 0.4
+
+
+def is_limit_down(change_pct, digits, name=""):
+    return (
+        change_pct is not None
+        and change_pct <= -limit_threshold(digits, name) + 0.4
+    )
+
+
+def is_limit_up_touched(high, prev_close, digits, name=""):
+    if high is None or prev_close is None or prev_close <= 0:
+        return False
+    target = prev_close * (1 + limit_threshold(digits, name) / 100.0)
+    return high >= target - 0.01
 
 
 def fetch_json(url_tpl, **params):
@@ -225,11 +241,12 @@ def fetch_board_quote(bk_code):
     }
 
 
-def fetch_stocks(bk_code, sort, need):
-    """按页拉板块成分股（fs=b:BKxxxx），直到覆盖 need 只。"""
+def fetch_stocks(bk_code, sort, need, return_status=False):
+    """按页拉板块成分股；need=None 时扫描到末页。"""
     page_size = 100
     collected = []
     last_error = None
+    complete = False
     for page_no in range(1, 30):
         url_tpl = (
             "{host}/api/qt/clist/get?pn={pn}&pz={pz}&po=1&np=1&fltt=2&invt=2"
@@ -255,13 +272,18 @@ def fetch_stocks(bk_code, sort, need):
             last_error = "第 {} 页拉取失败：{}".format(page_no, page_error)
             break
         if not page:
+            complete = True
             break
         collected.extend(page)
-        if len(page) < page_size or len(collected) >= need:
+        if len(page) < page_size:
+            complete = True
+            break
+        if need is not None and len(collected) >= need:
+            complete = True
             break
     if not collected and last_error:
         raise RuntimeError(last_error)
-    return collected
+    return (collected, complete) if return_status else collected
 
 
 def _avg(values):
@@ -314,8 +336,14 @@ def fetch_f10_members_quotes(bk_code):
             "industry": "-",
             "ts": None,
             "quote_date": None,
-            "limit_up": is_limit_up(quote.get("price"), quote.get("high"),
-                                    quote.get("change_pct"), digits),
+            "limit_up": is_limit_up(
+                quote.get("price"), quote.get("high"),
+                quote.get("change_pct"), digits, quote.get("name")),
+            "limit_down": is_limit_down(
+                quote.get("change_pct"), digits, quote.get("name")),
+            "limit_up_touched": is_limit_up_touched(
+                quote.get("high"), quote.get("prev_close"),
+                digits, quote.get("name")),
         })
     if not rows:
         raise RuntimeError("腾讯行情未取到 {} 的成分股行情（可能全部停牌）。".format(bk_code))
@@ -427,6 +455,7 @@ def pass_fallback_filters(row, args):
 def build_fallback(bk_code, args):
     """备用源整条链路：F10 成分股 → 腾讯行情 → 过滤/排序 → 补数 → 板块行自算。"""
     board_name, rows = fetch_f10_members_quotes(bk_code)
+    full_rows = rows
     rows = [r for r in rows if pass_fallback_filters(r, args)]
     if not rows:
         raise RuntimeError(
@@ -459,7 +488,14 @@ def build_fallback(bk_code, args):
         limitation += "近5日/近10日涨幅与主力净流入只补前 {} 只（其余为 -）。".format(
             FALLBACK_ENRICH_CAP)
     quote_date = max((r["quote_date"] for r in shown if r.get("quote_date")), default=None)
-    return board, [dict((k, r.get(k)) for k in ROW_KEYS) for r in shown], limitation, quote_date
+    diffusion = compute_diffusion(full_rows, sample_complete=False)
+    return (
+        board,
+        [dict((k, r.get(k)) for k in ROW_KEYS) for r in shown],
+        limitation,
+        quote_date,
+        diffusion,
+    )
 
 
 def normalize_rows(diff, min_turnover, max_turnover, min_gain, max_gain,
@@ -491,6 +527,7 @@ def normalize_rows(diff, min_turnover, max_turnover, min_gain, max_gain,
             continue
         price = to_float(raw.get("f2"))
         high = to_float(raw.get("f15"))
+        prev_close = to_float(raw.get("f18"))
         sec_code = to_sec_code(str(raw.get("f13") or ""), digits)
         amount_yuan = to_float(raw.get("f6"))
         main_yuan = to_float(raw.get("f62"))
@@ -515,7 +552,11 @@ def normalize_rows(diff, min_turnover, max_turnover, min_gain, max_gain,
             "main_yuan": main_yuan,
             "industry": str(raw.get("f100") or "-"),
             "ts": to_float(raw.get("f124")),
-            "limit_up": is_limit_up(price, high, change_pct, digits),
+            "limit_up": is_limit_up(
+                price, high, change_pct, digits, name),
+            "limit_down": is_limit_down(change_pct, digits, name),
+            "limit_up_touched": is_limit_up_touched(
+                high, prev_close, digits, name),
         })
     fb.clear_duplicate_gain10(rows)
     return rows
@@ -554,8 +595,54 @@ def source_caliber_note(source):
             "与东财口径不可混比。")
 
 
+def compute_diffusion(rows, sample_complete=True):
+    """按完整同源成分股计算上涨、下跌、平盘及排除项。"""
+    counts = {
+        "up": 0,
+        "down": 0,
+        "flat": 0,
+        "excluded_limit_up": 0,
+        "excluded_limit_touched": 0,
+        "excluded_limit_down": 0,
+        "excluded_suspended": 0,
+        "excluded_unquoted": 0,
+    }
+    for row in rows:
+        if row.get("suspended"):
+            counts["excluded_suspended"] += 1
+            continue
+        change = to_float(row.get("change_pct"))
+        if change is None:
+            counts["excluded_unquoted"] += 1
+            continue
+        if row.get("limit_up"):
+            counts["excluded_limit_up"] += 1
+            continue
+        if row.get("limit_up_touched"):
+            counts["excluded_limit_touched"] += 1
+            continue
+        if row.get("limit_down"):
+            counts["excluded_limit_down"] += 1
+            continue
+        if change > 0:
+            counts["up"] += 1
+        elif change < 0:
+            counts["down"] += 1
+        else:
+            counts["flat"] += 1
+    eligible = counts["up"] + counts["down"] + counts["flat"]
+    return {
+        "total": len(rows),
+        **counts,
+        "eligible": eligible,
+        "rate_pct": round(counts["up"] * 100.0 / eligible, 2)
+        if eligible else None,
+        "sample_complete": bool(sample_complete),
+    }
+
+
 def render_text(board, rows, sort, top, quote_time, filter_text,
-                source="eastmoney", limitation=None):
+                source="eastmoney", limitation=None, diffusion=None):
     lines = []
     up = "-" if board["up_count"] is None else int(board["up_count"])
     down = "-" if board["down_count"] is None else int(board["down_count"])
@@ -583,6 +670,26 @@ def render_text(board, rows, sort, top, quote_time, filter_text,
     lines.append("过滤：{}。{}".format(filter_text, source_caliber_note(source)))
     if limitation:
         lines.append(limitation)
+    if diffusion:
+        lines.append(
+            "扩散 D={rate}（上涨 {up} / 下跌 {down} / 平盘 {flat}；"
+            "排除涨停 {zt}、炸板 {zb}、跌停 {dt}、停牌 {sus}、无行情 {missing}；"
+            "完整样本：{complete}）".format(
+                rate=(
+                    "未获取" if diffusion.get("rate_pct") is None
+                    else "{}%".format(diffusion["rate_pct"])
+                ),
+                up=diffusion.get("up"),
+                down=diffusion.get("down"),
+                flat=diffusion.get("flat"),
+                zt=diffusion.get("excluded_limit_up"),
+                zb=diffusion.get("excluded_limit_touched"),
+                dt=diffusion.get("excluded_limit_down"),
+                sus=diffusion.get("excluded_suspended"),
+                missing=diffusion.get("excluded_unquoted"),
+                complete="是" if diffusion.get("sample_complete") else "否",
+            )
+        )
     if len(rows) < top:
         lines.append("注：过滤后实际返回 {n} 只（请求 {top} 只）；需要更多候选请调大 --top 或放宽过滤。".format(
             n=len(rows), top=top))
@@ -610,7 +717,9 @@ def render_text(board, rows, sort, top, quote_time, filter_text,
     return "\n".join(lines)
 
 
-def build_compact_payload(board, rows, sort, top, quote_time, source, limitation):
+def build_compact_payload(
+        board, rows, sort, top, quote_time, source, limitation,
+        diffusion=None):
     """输出板块扩散摘要与涨幅前列，不返回全部成分股明细。"""
     def number(value, digits=2):
         value = to_float(value)
@@ -624,6 +733,8 @@ def build_compact_payload(board, rows, sort, top, quote_time, source, limitation
                 if row.get("change10_pct") is not None]
     flows = [number(row.get("main_yuan"), 0) for row in rows
              if row.get("main_yuan") is not None]
+    diffusion = diffusion or compute_diffusion(
+        rows, sample_complete=(source == "eastmoney"))
     leaders = sorted(
         rows,
         key=lambda row: (
@@ -655,8 +766,14 @@ def build_compact_payload(board, rows, sort, top, quote_time, source, limitation
         "requested_top": top,
         "source": source,
         "source_name": SOURCE_NAMES[source],
+        "source_board_code": board.get("code"),
+        "downstream_supported": (
+            source == "eastmoney"
+            and str(board.get("code") or "").startswith("BK")
+        ),
         "quote_time": quote_time,
         "limitation": limitation,
+        "diffusion": diffusion,
         "summary": {
             "sample": len(rows),
             "quoted_change": len(changes),
@@ -712,7 +829,7 @@ def main():
     if args.top <= 0:
         sys.exit("错误：--top 必须为正整数。")
 
-    board = rows = limitation = None
+    board = rows = limitation = diffusion = None
     quote_time = None
     source = None
     errors = []
@@ -722,8 +839,13 @@ def main():
                 board = fetch_board_quote(bk_code)
                 has_filter = bool(args.min_turnover or args.max_turnover or args.min_gain
                                   or args.max_gain or args.min_float_cap or args.max_float_cap)
-                raw_need = args.top if not has_filter else max(args.top * 5, 300)
-                diff = fetch_stocks(bk_code, args.sort, raw_need)
+                diff, sample_complete = fetch_stocks(
+                    bk_code, args.sort, None, return_status=True)
+                full_rows = normalize_rows(
+                    diff, 0, 0, 0, 0, 0, 0, True)
+                diffusion = compute_diffusion(
+                    full_rows, sample_complete=sample_complete,
+                )
                 rows = normalize_rows(
                     diff, args.min_turnover, args.max_turnover, args.min_gain,
                     args.max_gain, args.min_float_cap, args.max_float_cap,
@@ -739,15 +861,16 @@ def main():
                 if all(r["volume_ratio"] is None for r in rows):
                     missing_cols.append("量比（东财接口本次未返回 f10，整列标 -）")
                 if has_filter:
-                    missing_cols.append("带过滤时只在按排序取到的前 {} 只里筛选，窗口外个股不参与".format(
-                        raw_need))
+                    missing_cols.append(
+                        "显示榜按过滤条件筛选；扩散统计仍使用完整成分股")
                 limitation = ("口径：东方财富板块/行情公开接口（push2 clist / ulist.np）；"
                               + "；".join(missing_cols)) if missing_cols else None
                 if quote_time is None:
                     prefix = (limitation + "；") if limitation else "口径：东方财富板块/行情公开接口；"
                     limitation = prefix + "行情接口未返回数据时间，数据时间标未获取"
             else:
-                board, rows, limitation, quote_date = build_fallback(bk_code, args)
+                board, rows, limitation, quote_date, diffusion = build_fallback(
+                    bk_code, args)
                 quote_time = quote_date or None   # 取不到交易日就不写本机日期
             source = candidate
             break
@@ -776,6 +899,9 @@ def main():
             "source": source,
             "source_name": SOURCE_NAMES[source],
             "quote_time": quote_time,
+            "source_board_code": board.get("code"),
+            "downstream_supported": source == "eastmoney",
+            "diffusion": diffusion,
             "rows": rows,
             "note": "数据来源：{}；{}".format(SOURCE_NAMES[source], source_caliber_note(source)),
             "limitation": limitation,
@@ -785,7 +911,8 @@ def main():
 
     if args.compact:
         payload = build_compact_payload(
-            board, rows, args.sort, args.top, quote_time, source, limitation)
+            board, rows, args.sort, args.top, quote_time, source, limitation,
+            diffusion=diffusion)
         print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
         return
 
@@ -798,7 +925,8 @@ def main():
                                   args.min_gain, args.max_gain,
                                   args.min_float_cap, args.max_float_cap,
                                   args.include_st),
-                      source=source, limitation=limitation))
+                      source=source, limitation=limitation,
+                      diffusion=diffusion))
 
 
 if __name__ == "__main__":

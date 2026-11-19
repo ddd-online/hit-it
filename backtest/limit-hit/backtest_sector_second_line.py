@@ -728,6 +728,15 @@ def build_arg_parser():
     return parser
 
 
+def backtest_limitations():
+    return [
+        "当前概念成分不是历史快照，存在概念调整和幸存者偏差。",
+        "日 K 无法还原四个时点的真实价格、量比和盘口。",
+        "D 日开盘价是第二梯队组指定的历史代理买入价。",
+        "缺少历史盘中完整成分股广度，无法严格验证 v1.7 的同源完整样本 D 准入。",
+    ]
+
+
 def main():
     args = build_arg_parser().parse_args()
     if args.capital <= 0:
@@ -750,11 +759,7 @@ def main():
         "stamp_duty_rate": 0.0005,
         "transfer_rate": 0.00001,
     }
-    limitations = [
-        "当前概念成分不是历史快照，存在概念调整和幸存者偏差。",
-        "日 K 无法还原四个时点的真实价格、量比和盘口。",
-        "D 日开盘价是第二梯队组指定的历史代理买入价。",
-    ]
+    limitations = backtest_limitations()
     requested_dates = set(dates)
     requested_errors = [
         error for error in errors if error["date"] in requested_dates

@@ -482,6 +482,7 @@ class CompactPayloadTest(unittest.TestCase):
 
     def test_compact_payload_exposes_rule_profile_and_market_gate(self):
         payload = {
+            "quote_time": "2026-11-19 09:42:00",
             "rule_profile": {"name": "theme-first"},
             "market_gate": {"state": "偏弱", "action": "max_one"},
             "themes": [],
@@ -492,6 +493,7 @@ class CompactPayloadTest(unittest.TestCase):
 
         self.assertEqual(compact["rule_profile"]["name"], "theme-first")
         self.assertEqual(compact["market_gate"]["action"], "max_one")
+        self.assertEqual(compact["quote_time"], "2026-11-19 09:42:00")
 
 
 class ProfilePipelineTest(unittest.TestCase):

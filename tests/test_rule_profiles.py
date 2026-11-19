@@ -40,6 +40,17 @@ class ProfileConfigTest(unittest.TestCase):
                         },
                     },
                 },
+                "second_line": {
+                    "admission": "strict",
+                    "retreat_cap": "watch_only",
+                    "collapse_cap": "watch_only",
+                },
+                "theme_score": {
+                    "missing_dimension": "exact_only",
+                },
+                "market_gate": {
+                    "retreat_time_gate": "10:30",
+                },
             },
         )
 
@@ -63,6 +74,16 @@ class ProfileConfigTest(unittest.TestCase):
         self.assertFalse(profile["one_word_executable"])
         self.assertTrue(profile["collapse_veto"])
         self.assertFalse(profile["weak_market_gate"]["override"]["enabled"])
+
+    def test_v16_profile_keeps_legacy_second_line_and_score_behavior(self):
+        module = load_module()
+
+        profile = module.load_rule_profile("v1.6")
+
+        self.assertEqual(profile["second_line"]["admission"], "legacy")
+        self.assertEqual(profile["second_line"]["retreat_cap"], "no_list")
+        self.assertEqual(profile["theme_score"]["missing_dimension"], "zero")
+        self.assertEqual(profile["market_gate"]["retreat_time_gate"], "09:30")
 
     def test_unknown_profile_is_rejected(self):
         module = load_module()
@@ -234,6 +255,78 @@ class MarketGateTest(unittest.TestCase):
 
         self.assertTrue(gate["retreat"])
         self.assertEqual(gate["action"], "no_trade")
+
+    def test_early_retreat_is_pending_until_confirmation_time(self):
+        module = load_module()
+        fixture = weak_market_fixture()
+        fixture["market"]["dt_count"] = 2
+        fixture["market"]["max_board"] = 3
+        fixture["previous_max_board"] = 4
+        fixture["promotion_rate_pct"] = 6.06
+
+        gate = module.evaluate_market_gate(
+            **fixture,
+            promotion_sample_time="2026-11-19 09:42:00",
+            profile=module.load_rule_profile("theme-first"),
+        )
+
+        self.assertTrue(gate["retreat"])
+        self.assertFalse(gate["retreat_confirmed"])
+        self.assertEqual(gate["state"], "退潮待确认")
+        self.assertEqual(gate["action"], "max_one")
+        self.assertEqual(gate["max_picks"], 1)
+
+    def test_before_auction_stops_market_conclusion(self):
+        module = load_module()
+        fixture = weak_market_fixture()
+
+        gate = module.evaluate_market_gate(
+            **fixture,
+            promotion_sample_time="2026-11-19 09:23:40",
+            profile=module.load_rule_profile("theme-first"),
+        )
+
+        self.assertEqual(gate["state"], "开盘未撮合")
+        self.assertEqual(gate["action"], "no_conclusion")
+        self.assertTrue(gate["veto"])
+
+    def test_retreat_is_confirmed_at_configured_time(self):
+        module = load_module()
+        fixture = weak_market_fixture()
+        fixture["market"]["dt_count"] = 2
+        fixture["market"]["max_board"] = 3
+        fixture["previous_max_board"] = 4
+        fixture["promotion_rate_pct"] = 6.06
+
+        gate = module.evaluate_market_gate(
+            **fixture,
+            promotion_sample_time="2026-11-19 10:30:00",
+            profile=module.load_rule_profile("theme-first"),
+        )
+
+        self.assertTrue(gate["retreat_confirmed"])
+        self.assertEqual(gate["state"], "退潮")
+        self.assertEqual(gate["action"], "no_trade")
+
+    def test_pending_retreat_raises_candidate_threshold_to_85(self):
+        module = load_module()
+        fixture = weak_market_fixture()
+        fixture["market"]["dt_count"] = 2
+        fixture["market"]["max_board"] = 3
+        fixture["previous_max_board"] = 4
+        fixture["promotion_rate_pct"] = 6.06
+        profile = module.load_rule_profile("theme-first")
+        gate = module.evaluate_market_gate(
+            **fixture,
+            promotion_sample_time="2026-11-19 09:42:00",
+            profile=profile,
+        )
+
+        threshold = module.minimum_candidate_score(
+            theme_score=87, mode="one_to_two",
+            market_gate=gate, profile=profile)
+
+        self.assertEqual(threshold, 85)
 
     def test_collective_low_open_caps_theme_first_at_one(self):
         module = load_module()

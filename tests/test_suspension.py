@@ -95,6 +95,7 @@ class SuspendedQuoteTest(unittest.TestCase):
 
         self.assertEqual(quote["volume_hands"], 0.0)
         self.assertEqual(quote["quote_date"], "20261116")
+        self.assertEqual(quote["quote_time"], "20261116150000")
 
     def test_open_close_summary_excludes_suspended_samples(self):
         rows = [
@@ -143,6 +144,110 @@ class SuspendedQuoteTest(unittest.TestCase):
             [], [], [], previous, [], [], quotes, "20261116", {}, True, [])
 
         self.assertIn("停牌 1 只", text)
+
+    def test_quote_time_before_auction_marks_previous_limit_unmatched(self):
+        previous = [{
+            "code": "sz002261",
+            "name": "拓维信息",
+            "industry": "软件服务",
+            "board_count": 1,
+            "amount_yi": 3.0,
+        }]
+        quotes = {
+            "002261": {
+                "price": 0.0,
+                "prev_close": 32.82,
+                "open": 0.0,
+                "high": 0.0,
+                "low": 0.0,
+                "volume_hands": 0.0,
+                "pct": 0.0,
+                "quote_date": "20261119",
+                "quote_time": "20261119092340",
+            },
+        }
+
+        row = LIMIT_UP.prev_zt_today_rows(
+            previous, quotes, set(), set(), "20261118")[0]
+
+        self.assertEqual(row["open_status"], "未撮合")
+        self.assertIsNone(row["today_open"])
+        self.assertIsNone(row["gap_pct"])
+        self.assertEqual(row["open_class"], "-")
+
+    def test_zero_open_without_quote_time_never_computes_negative_hundred(self):
+        previous = [{
+            "code": "sz002261",
+            "name": "拓维信息",
+            "industry": "软件服务",
+            "board_count": 1,
+            "amount_yi": 3.0,
+        }]
+        quotes = {
+            "002261": {
+                "price": 0.0,
+                "prev_close": 32.82,
+                "open": 0.0,
+                "high": 0.0,
+                "low": 0.0,
+                "volume_hands": 0.0,
+                "pct": 0.0,
+                "quote_date": "20261119",
+            },
+        }
+
+        row = LIMIT_UP.prev_zt_today_rows(
+            previous, quotes, set(), set(), "20261118")[0]
+
+        self.assertEqual(row["open_status"], "未撮合")
+        self.assertIsNone(row["gap_pct"])
+
+    def test_open_close_summary_nulls_counts_when_auction_is_unmatched(self):
+        rows = [
+            {"open_status": "未撮合", "open_class": "-", "gap_pct": None,
+             "today_pct": None, "close_state": "-", "suspended": False},
+            {"open_status": "未撮合", "open_class": "-", "gap_pct": None,
+             "today_pct": None, "close_state": "-", "suspended": False},
+        ]
+
+        summary = LIMIT_UP.open_close_summary(rows)
+
+        self.assertEqual(summary["status"], "未撮合")
+        self.assertEqual(summary["unmatched"], 2)
+        self.assertIsNone(summary["up_open"])
+        self.assertIsNone(summary["flat_open"])
+        self.assertIsNone(summary["down_open"])
+        self.assertIsNone(summary["avg_gap_pct"])
+        self.assertIsNone(summary["median_gap_pct"])
+
+    def test_text_report_says_auction_not_matched(self):
+        previous = [{
+            "code": "sz002261",
+            "name": "拓维信息",
+            "industry": "软件服务",
+            "board_count": 1,
+            "amount_yi": 3.0,
+        }]
+        quotes = {
+            "002261": {
+                "price": 0.0,
+                "prev_close": 32.82,
+                "open": 0.0,
+                "high": 0.0,
+                "low": 0.0,
+                "volume_hands": 0.0,
+                "pct": 0.0,
+                "quote_date": "20261119",
+                "quote_time": "20261119092340",
+            },
+        }
+
+        text = LIMIT_UP.render_text(
+            datetime(2026, 11, 18), datetime(2026, 11, 17),
+            [], [], [], previous, [], [], quotes, "20261119", {}, True, [])
+
+        self.assertIn("开盘价未撮合", text)
+        self.assertNotIn("-100", text)
 
 
 class SuspensionFeedbackTest(unittest.TestCase):
@@ -331,6 +436,7 @@ class SuspensionFilterTest(unittest.TestCase):
             "prev_date": "20261113",
             "quote_date": "20261116",
             "overview": {},
+            "quote_time": "20261116 09:42:00",
             "one_word": {},
             "zt_rows": [
                 {"code": "sh605255", "name": "停牌高标", "board_count": 5,
@@ -390,6 +496,10 @@ class SuspensionFilterTest(unittest.TestCase):
                 os.chdir(old_cwd)
 
         self.assertEqual(payload["board_permission_excluded_count"], 1)
+        self.assertEqual(
+            payload["market_gate"]["promotion_sample_time"],
+            "20261116 09:42:00",
+        )
         self.assertEqual(payload["suspension_filter"]["excluded_count"], 1)
         self.assertEqual(
             [row["code"] for row in payload["candidates"]], ["sh600386"])

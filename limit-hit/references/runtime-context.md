@@ -50,7 +50,8 @@ python limit-hit/scripts/prepare_candidates.py --stock 日发精机 --compact
    - 获利盘、平均成本、90% 筹码集中度、筹码峰；
 7. 输出数据限制、异常和“一字板/尾盘首封/开板过多/换手过热”等事实标签；
 8. 输出一进二、二进三分模式晋级/高开统计，以及当前最高板和 2 板及以上家数；
-9. 读取 `config/rules.yaml`，输出 `rule_profile`、`market_gate` 和 `one_word_filter`，拆分宽度崩塌与高标崩塌。
+9. 读取 `config/rules.yaml`，输出 `rule_profile`、`market_gate` 和 `one_word_filter`，拆分宽度崩塌与高标崩塌；同时输出真实行情快照时间 `quote_time` 与 `market_gate.promotion_sample_time`。
+10. `09:25` 前按行情时间识别“开盘未撮合”，不得把 `open=0` 计算成低开；`09:25–10:30` 的低晋级率输出“退潮待确认”，10:30 后才确认退潮。
 
 单股模式在上述公共上下文之外额外完成：
 
@@ -69,20 +70,23 @@ python limit-hit/scripts/prepare_candidates.py --stock 日发精机 --compact
 模型拿到脚本 JSON 后只做以下工作：
 
 1. 根据题材宽度、梯队、昨日延续和当前扩散，决定哪些题材值得继续分析；
-2. 将入围的 1–3 个题材一次传给 `scripts/fetch_sector_boards.py --search ... --json`，再只对返回的 BK 调用 `scripts/fetch_sector_leaders.py --json`；同一份成分股事实同时用于扩散统计和第二梯队初筛；
+2. 将入围的 1–3 个题材一次传给 `scripts/fetch_sector_boards.py --search ... --json`，检查每行 `source_board_code` 与 `downstream_supported`，再只对同源 `BK` 调用 `scripts/fetch_sector_leaders.py --json`；同一份完整成分股事实同时用于扩散统计和第二梯队初筛；
 3. 只对每个题材的前 1–2 只候选搜索最新消息，并调用新闻、资金流报告；
 4. 根据洗盘、筹码、梯队、题材趋势和消息硬门槛，决定“可打板/只观察/排除”；
 5. 一个题材只保留一只，写入固定报告。
 
+题材强度分仍由模型按 100 分规则研判。必须结合 `field_quality` 和原始字段标明 `exact / partial / unavailable`；只有 `exact` 能通过 80/85 硬门槛，`partial` 只能“只观察”，不得按剩余满分归一后放行。
+
 第二梯队使用相同数据链路但不套用打板分数：
 
-1. 用 `fetch_sector_leaders.py --json` 通读题材内全部主板、未涨停、仍在交易成分股；
-2. 模型先按同题材逻辑、执行时点量价和相对强弱保留每题材 2–5 只，并按代码去重；
-3. 父模型先冻结本批 `data_date`、快照时间和题材/BK 上下文；同一代码只评估一次；
-4. 每只初筛股票启动一个独立子代理，完整执行单股审视流程：`prepare_candidates.py --stock <代码> --json`、目标股题材扩散、新闻公告、资金和六维判断；
-5. 子代理只返回单股证据与“第二梯队候选/只观察/排除”，不横向比较、不写最终报告、不创建状态文件；
-6. 父模型汇总后检查行情时点一致性，再按题材横向比较并选优；
-7. 环境不支持子代理时报告限制并询问是否允许串行；获准后才能降级并注明。
+1. 先按 `core / ladder / D` 计算准入；`D=上涨/(上涨+下跌+平盘)`，只接受 `diffusion.sample_complete=true` 的同源完整样本；
+2. 用 `fetch_sector_leaders.py --json` 通读题材内全部主板、未涨停、仍在交易成分股；`--top` 不参与扩散率计算；
+3. 模型先按同题材逻辑、执行时点量价和相对强弱保留每题材 2–5 只，并按代码去重；
+4. 父模型先冻结本批 `data_date`、快照时间和题材/BK 上下文；同一代码只评估一次；
+5. 每只初筛股票启动一个独立子代理，完整执行单股审视流程：`prepare_candidates.py --stock <代码> --json`、目标股题材扩散、新闻公告、资金和六维判断；
+6. 子代理只返回单股证据与“第二梯队候选/只观察/排除”，不横向比较、不写最终报告、不创建状态文件；
+7. 父模型汇总后检查行情时点一致性，再按题材横向比较并选优；
+8. 环境不支持子代理时报告限制并询问是否允许串行；获准后才能降级并注明。
 
 脚本的排序、板块分和候选指标只提供事实，不得直接决定第二梯队；子代理结论也不能按数量或简单多数机械汇总，最终取舍由父模型完成。
 
@@ -92,18 +96,18 @@ python limit-hit/scripts/prepare_candidates.py --stock 日发精机 --compact
 
 ## 主要输出字段
 
-- `data_date`、`previous_date`、`quote_date`；
+- `data_date`、`previous_date`、`quote_date`、`quote_time`；
 - `board_permission`、`board_permission_excluded_count`：固定沪深主板权限及被排除的一/二板数量；
 - `suspension_filter`：停牌最高板、触发的行业/精确概念、连带排除数及逐股排除明细；
-- `rule_profile`：实际 profile 名称和三个规则开关；
-- `market_gate`：`breadth_collapse`、`leader_collapse`、`retreat`、情绪状态、动作和数量上限；
+- `rule_profile`：实际 profile 名称、三个原有规则开关及 `second_line`、`theme_score`、`market_gate` 新口径；
+- `market_gate`：`breadth_collapse`、`leader_collapse`、`retreat`、`retreat_confirmed`、`promotion_sample_time`、情绪状态、动作和数量上限；
 - `one_word_filter`：一字板排除数和逐股原因；保留候选仍在 `candidates`；
 - `report_path`：由 `data_date` 生成的 `report/打板候选/YYYY-MM-DD.md`；
 - `previous_source`、`previous_pool_report`、`previous_pool_generated`（固定 `false`）、`previous_context`；
 - `current_pool_report`、`current_pool_generated`：固定为 `null`/`false`，运行时只处理实时快照，不落盘涨停池；
 - `market`：当日概览；
 - `market.max_board`、`market.two_plus_count`、`market.board_counts`：当前连板高度结构；
-- `yesterday_open`：昨日涨停总样本、有效开盘、行情缺失、停牌和高开/平开/低开分布；
+- `yesterday_open`：`status`、总样本、有效开盘、未撮合、行情缺失、停牌和高开/平开/低开分布；未撮合时计数与均值可为 `null`；
 - `yesterday_highest_board`：昨日最高板及今日表现，每项含行业、精确概念/名称组、停牌状态；
 - `mode_feedback`：昨日一进二、二进三的有效样本、停牌数、晋级率、高开率和平均开盘/收盘；
 - `themes`：题材聚合与板数结构；

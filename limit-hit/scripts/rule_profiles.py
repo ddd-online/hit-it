@@ -3,6 +3,7 @@
 """加载并校验 limit-hit 的固定 YAML 规则配置。"""
 
 import copy
+from datetime import datetime
 from pathlib import Path
 
 
@@ -10,6 +11,8 @@ CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "rules.yaml"
 
 
 def _scalar(value, path, line_number):
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1]
     if value == "true":
         return True
     if value == "false":
@@ -78,6 +81,28 @@ def _validate(name, profile):
         modes = _require(override, ("min_score_by_mode",), dict)
         _require(modes, ("one_to_two",), int)
         _require(modes, ("two_to_three",), int)
+    second_line = _require(profile, ("second_line",), dict)
+    admission = _require(second_line, ("admission",), str)
+    retreat_cap = _require(second_line, ("retreat_cap",), str)
+    collapse_cap = _require(second_line, ("collapse_cap",), str)
+    if admission not in ("strict", "legacy"):
+        raise ValueError("配置值错误：second_line.admission")
+    if retreat_cap not in ("watch_only", "no_list"):
+        raise ValueError("配置值错误：second_line.retreat_cap")
+    if collapse_cap not in ("watch_only", "no_list"):
+        raise ValueError("配置值错误：second_line.collapse_cap")
+    theme_score = _require(profile, ("theme_score",), dict)
+    missing_dimension = _require(
+        theme_score, ("missing_dimension",), str)
+    if missing_dimension not in ("exact_only", "zero"):
+        raise ValueError("配置值错误：theme_score.missing_dimension")
+    market_gate = _require(profile, ("market_gate",), dict)
+    retreat_time_gate = _require(
+        market_gate, ("retreat_time_gate",), str)
+    try:
+        datetime.strptime(retreat_time_gate, "%H:%M")
+    except ValueError:
+        raise ValueError("配置值错误：market_gate.retreat_time_gate")
 
 
 def load_rule_profile(name="theme-first", path=None):
@@ -186,7 +211,8 @@ def _leader_collapse(yesterday_high):
 
 
 def evaluate_market_gate(market, promotion_rate_pct, yesterday_open,
-                         yesterday_high, previous_max_board, profile):
+                         yesterday_high, previous_max_board, profile,
+                         promotion_sample_time=None):
     """拆分市场宽度与最高板风险，并给出 profile 对应的数量门槛。"""
     market = market or {}
     zt_count = _number(market.get("zt_count"))
@@ -213,6 +239,25 @@ def evaluate_market_gate(market, promotion_rate_pct, yesterday_open,
         and promotion is not None
         and promotion < 15
     )
+    sample_clock = None
+    if promotion_sample_time:
+        try:
+            sample_clock = datetime.strptime(
+                str(promotion_sample_time), "%Y-%m-%d %H:%M:%S").time()
+        except ValueError:
+            sample_clock = None
+    opening_unmatched = bool(
+        sample_clock
+        and sample_clock < datetime.strptime("09:25:00", "%H:%M:%S").time()
+    )
+    retreat_confirmed = retreat
+    if retreat and sample_clock:
+        try:
+            gate_time = datetime.strptime(
+                profile["market_gate"]["retreat_time_gate"], "%H:%M").time()
+            retreat_confirmed = sample_clock >= gate_time
+        except ValueError:
+            retreat_confirmed = True
     weak = bool(
         (promotion is not None and 15 <= promotion < 25)
         or (break_rate is not None and 35 <= break_rate <= 45)
@@ -229,6 +274,10 @@ def evaluate_market_gate(market, promotion_rate_pct, yesterday_open,
         state, action, max_picks = "崩塌", "observe_only", 0
     elif missing_counts:
         state, action, max_picks = "数据未获取", "no_conclusion", 0
+    elif opening_unmatched:
+        state, action, max_picks = "开盘未撮合", "no_conclusion", 0
+    elif retreat and not retreat_confirmed:
+        state, action, max_picks = "退潮待确认", "max_one", 1
     elif retreat:
         state, action, max_picks = "退潮", "no_trade", 0
     elif breadth_collapse and profile["collapse_veto"]:
@@ -243,10 +292,13 @@ def evaluate_market_gate(market, promotion_rate_pct, yesterday_open,
         "breadth_collapse": breadth_collapse,
         "leader_collapse": leader_collapse,
         "retreat": retreat,
+        "retreat_confirmed": retreat_confirmed,
+        "opening_unmatched": opening_unmatched,
         "weak": weak,
         "collective_low_open": collective_low_open,
         "break_rate_pct": break_rate,
         "promotion_rate_pct": promotion,
+        "promotion_sample_time": promotion_sample_time,
         "veto": action in ("no_trade", "observe_only", "no_conclusion"),
         "max_picks": max_picks,
         "weak_market_gate": copy.deepcopy(profile["weak_market_gate"]),
@@ -263,6 +315,8 @@ def minimum_candidate_score(theme_score, mode, market_gate, profile):
         raise ValueError("未知候选模式：{}".format(mode))
     if market_gate["action"] in ("no_trade", "observe_only", "no_conclusion"):
         return None
+    if market_gate["state"] == "退潮待确认":
+        return 85
     if market_gate["state"] != "偏弱":
         return mode_gate[mode]
     weak_gate = profile["weak_market_gate"]

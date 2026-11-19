@@ -9,7 +9,7 @@
 
 输出: 板块行情榜——按所选排序返回 Top N 行业/概念板块，含板块指数、当日涨跌幅、
 近5日/近10日累计涨跌幅、领涨股（名称/代码/涨幅）、上涨/下跌家数、成交额、换手率
-与主力净流入；不产生缓存文件。
+与主力净流入，以及 `source_board_code`、能否同源下钻和计分字段完整度；不产生缓存文件。
 
 数据源: 东方财富板块行情（push2 clist）优先；该接口不可用时自动切换腾讯板块行情
 （板块榜 pt/getRank + 板块指数日K），主力净流入等字段照常给出、不再退回“未获取”。
@@ -460,6 +460,8 @@ def prepare_rows(args):
                 meta["same_5_10"] = any(
                     r.get("change10_duplicate") for r in rows
                 )
+            for row in rows:
+                row.update(source_capabilities(source, row.get("code")))
             return source, rows, meta
         except Exception as exc:  # noqa: BLE001 主源失败切备用源，两源全失败才报错
             errors.append("{}：{}".format(SOURCE_NAMES[source], exc))
@@ -482,6 +484,57 @@ def source_note(source):
             "主力净流入与成交额为腾讯口径（万元换算亿）、近5日涨幅取自腾讯、"
             "近10日涨幅按板块指数收盘价回算；板块代码为腾讯板块代码（非东财 BK 代码），"
             "下钻成分股需要东财接口可用；与东财口径数值不可混用于同一张对比表。")
+
+
+def source_capabilities(source, board_code):
+    """报告板块代码能否直接用于同源成分股下钻。"""
+    supported = source == "eastmoney" and str(board_code).startswith("BK")
+    return {
+        "source_board_code": board_code,
+        "downstream_supported": supported,
+        "downstream_reason": (
+            None if supported
+            else "当前板块代码不支持下钻；第二梯队需要东财 BK 同源成分股"
+        ),
+    }
+
+
+def summarize_source_capabilities(source, rows):
+    capabilities = [
+        source_capabilities(source, row.get("code")) for row in rows
+    ]
+    if not capabilities:
+        return source_capabilities(source, None)
+    supported = all(item["downstream_supported"] for item in capabilities)
+    return {
+        "source_board_code": (
+            capabilities[0]["source_board_code"]
+            if len(capabilities) == 1 else None
+        ),
+        "downstream_supported": supported,
+        "downstream_reason": (
+            None if supported
+            else "返回板块中存在不支持同源下钻的代码；第二梯队需逐行检查"
+        ),
+    }
+
+
+def summarize_field_quality(rows, fields):
+    """区分真实数值、部分缺失和整列未获取。"""
+    total = len(rows)
+    quality = {}
+    for field in fields:
+        available = sum(row.get(field) is not None for row in rows)
+        quality[field] = {
+            "available": available,
+            "missing": total - available,
+            "status": (
+                "exact" if total and available == total
+                else "partial" if available
+                else "unavailable"
+            ),
+        }
+    return quality
 
 
 def render_text(rows, args, source, quote_time, meta=None):
@@ -559,6 +612,7 @@ def main():
     quote_time = quote_label(source, rows)
 
     if args.json:
+        capabilities = summarize_source_capabilities(source, rows)
         payload = {
             "board_type": args.type,
             "board_type_name": BOARD_TYPE_NAMES[args.type],
@@ -571,6 +625,11 @@ def main():
             "source_name": SOURCE_NAMES[source],
             "quote_time": quote_time,
             "rows": rows,
+            "source_board_code": capabilities["source_board_code"],
+            "downstream_supported": capabilities["downstream_supported"],
+            "downstream_reason": capabilities["downstream_reason"],
+            "field_quality": summarize_field_quality(
+                rows, ("change_pct", "change5_pct", "main_inflow_yi")),
             "limitations": [text for text in (
                 "东财接口 f160 与 f109 同值，近10日涨幅不可用（10 日维度请用 --source tencent）"
                 if meta.get("same_5_10") else None,
